@@ -36,9 +36,7 @@ export const actions: Actions = {
       path: '/',
       httpOnly: true,
       sameSite: 'lax',
-      secure: url.protocol === 'https:',
-      expires: expiresAt,
-      maxAge: SESSION_TTL_MS / 1000
+      maxAge: Math.floor(SESSION_TTL_MS / 1000)
     });
 
     const redirectTo = url.searchParams.get('redirect') ?? '/';

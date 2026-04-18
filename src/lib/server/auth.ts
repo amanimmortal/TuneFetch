@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { getDb } from './db';
 import { env } from './env';
 
-export const SESSION_COOKIE = 'tunefetch_session';
+export const SESSION_COOKIE = 'tf_session';
 export const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 30; // 30 days
 
 interface UserRow {
