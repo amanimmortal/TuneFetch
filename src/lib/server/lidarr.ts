@@ -236,11 +236,12 @@ export function updateArtist(
 	return request<LidarrArtist>('PUT', `/api/v1/artist/${artist.id}`, artist, fetchFn);
 }
 
-/** Return all albums for an artist. */
-export function getAlbums(artistId: number, fetchFn?: FetchFn): Promise<LidarrAlbum[]> {
+/** Return all albums for an artist, or all albums if no artistId is provided. */
+export function getAlbums(artistId?: number, fetchFn?: FetchFn): Promise<LidarrAlbum[]> {
+	const path = artistId !== undefined ? `/api/v1/album?artistId=${artistId}` : '/api/v1/album';
 	return request<LidarrAlbum[]>(
 		'GET',
-		`/api/v1/album?artistId=${artistId}`,
+		path,
 		undefined,
 		fetchFn
 	);

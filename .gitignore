@@ -13,3 +13,6 @@ build/
 *.db-wal
 *.db-shm
 data/
+
+# Vite dev-server temp files
+vite.config.ts.timestamp-*.mjs

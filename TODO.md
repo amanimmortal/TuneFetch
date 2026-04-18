@@ -92,17 +92,17 @@ Recommended order because search results need to show "in Lidarr" badges (OQ-5) 
   - Both actions return `{ connectionStatus, connectionMessage, saved }` for the UI
 - [x] `src/lib/server/settings.ts` — `getLidarrConfig()` added, throws if URL or API key unset
 
-### 1B. MusicBrainz client (REQUIREMENTS §4B, §6)
+### 1B. MusicBrainz client (REQUIREMENTS §4B, §6) - COMPLETE
 
-- [ ] `src/lib/server/musicbrainz.ts` — server-side client
+- [x] `src/lib/server/musicbrainz.ts` — server-side client
   - 1 req/sec global queue (simple promise chain serialising calls)
   - `User-Agent: TuneFetch/1.0 ( <admin_contact_email> )` — email pulled from settings at request time
   - Methods for `artist`, `release-group`, `recording` search
-- [ ] `src/routes/api/search/+server.ts` — GET handler
+- [x] `src/routes/api/search/+server.ts` — GET handler
   - Query params: `q`, `type` (`artist|album|track`)
   - Runs MusicBrainz search + Lidarr artist match (OQ-5) + list-membership lookup in one response
   - Returns a shape suitable for the card layout (`{ results: [{ mbid, type, title, artist, album, inLidarr, listMemberships: [{ listId, listName }] }] }`)
-- [ ] `src/routes/+page.svelte` — Search UI
+- [x] `src/routes/+page.svelte` — Search UI
   - Text input + type filter
   - Result cards per REQUIREMENTS §4B (badges for "In Lidarr", list memberships)
   - Each card has an "Add to list" dropdown populated from `lists` table
