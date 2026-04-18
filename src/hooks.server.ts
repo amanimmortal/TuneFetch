@@ -8,6 +8,7 @@ import {
 // Importing env eagerly so the process fails fast if TUNEFETCH_SECRET is missing.
 import '$lib/server/env';
 import { startScheduler } from '$lib/server/scheduler';
+import { registerShutdownHandlers } from '$lib/server/shutdown';
 
 // Paths that are accessible without authentication.
 const PUBLIC_PREFIXES = ['/login', '/setup', '/api/webhook/'];
@@ -20,6 +21,8 @@ async function ensureSeed() {
   // Start the nightly orphan scan scheduler on first request.
   // startScheduler() is idempotent — safe to call here.
   startScheduler();
+  // Register SIGTERM/SIGINT handlers for clean shutdown.
+  registerShutdownHandlers();
 }
 
 function isPublic(pathname: string): boolean {
@@ -46,5 +49,21 @@ export const handle: Handle = async ({ event, resolve }) => {
     redirect(303, `/login?redirect=${target}`);
   }
 
-  return resolve(event);
+  // ── Structured request logging ─────────────────────────────────────────────
+  const t0 = Date.now();
+  const response = await resolve(event);
+  const ms = Date.now() - t0;
+  // Skip logging for Vite HMR and static asset requests to reduce noise.
+  if (!pathname.startsWith('/@') && !pathname.startsWith('/node_modules')) {
+    console.log(
+      JSON.stringify({
+        ts:     new Date().toISOString(),
+        method: event.request.method,
+        path:   pathname,
+        status: response.status,
+        ms
+      })
+    );
+  }
+  return response;
 };

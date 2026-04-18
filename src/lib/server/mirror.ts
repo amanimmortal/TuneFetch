@@ -139,6 +139,27 @@ export async function remirrorUpgrade(
   }
 }
 
+// ── Backfill job tracking (for graceful shutdown) ─────────────────────────────
+
+/** Set of currently running backfill Promises — used by flushPendingCopies(). */
+const _activeJobs = new Set<Promise<void>>();
+
+/**
+ * Wait for all in-progress backfill jobs to settle.
+ *
+ * Called during graceful shutdown to avoid interrupting mid-copy.
+ * If jobs don't finish within `timeoutMs` the wait is abandoned — the caller
+ * should then close the DB and exit.
+ */
+export async function flushPendingCopies(timeoutMs = 15_000): Promise<void> {
+  if (_activeJobs.size === 0) return;
+  console.log(`[mirror] Waiting for ${_activeJobs.size} active backfill job(s)...`);
+  await Promise.race([
+    Promise.allSettled([..._activeJobs]),
+    new Promise<void>((resolve) => setTimeout(resolve, timeoutMs))
+  ]);
+}
+
 // ── Backfill job ──────────────────────────────────────────────────────────────
 
 /**
@@ -148,13 +169,27 @@ export async function remirrorUpgrade(
  * This is called fire-and-forget when a cross-library add is detected:
  *   startBackfill(...).catch(console.error);
  *
+ * Active jobs are tracked in `_activeJobs` so graceful shutdown can wait for them.
+ *
  * Lifecycle:
  *   → list_item.sync_status = 'mirror_active'  (while copying)
  *   → 'mirror_pending'  (if no files downloaded yet — webhook will handle later)
  *   → 'synced'          (all files copied successfully)
  *   → 'mirror_broken'   (one or more copies failed)
  */
-export async function startBackfill(
+export function startBackfill(
+  lidarrArtistId: number,
+  listItemId: number,
+  ownerRoot: string,
+  targetRoot: string
+): Promise<void> {
+  const job = _runBackfill(lidarrArtistId, listItemId, ownerRoot, targetRoot);
+  _activeJobs.add(job);
+  job.finally(() => _activeJobs.delete(job)).catch(() => {});
+  return job;
+}
+
+async function _runBackfill(
   lidarrArtistId: number,
   listItemId: number,
   ownerRoot: string,

@@ -13,6 +13,8 @@ import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { getDb } from './db';
 import { getSetting, SETTING_KEYS } from './settings';
+import { cleanupExpiredSessions } from './auth';
+import { systemStatus } from './lidarr';
 
 // ── Orphan detection ──────────────────────────────────────────────────────────
 
@@ -132,6 +134,51 @@ function msUntilNextRun(timeStr: string): number {
   return next.getTime() - now.getTime();
 }
 
+// ── Session cleanup ───────────────────────────────────────────────────────────
+
+/**
+ * Start the hourly session-cleanup interval.
+ * Deletes rows from the sessions table where expires_at < now.
+ */
+function startSessionCleanup(): void {
+  const INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+  setInterval(() => {
+    try {
+      cleanupExpiredSessions();
+    } catch (err) {
+      console.error('[scheduler] Session cleanup failed:', err);
+    }
+  }, INTERVAL_MS).unref(); // unref so this timer doesn't prevent process exit
+}
+
+// ── Lidarr connectivity + webhook reminder ────────────────────────────────────
+
+/**
+ * Check Lidarr reachability on startup and warn if it's unreachable.
+ *
+ * Also logs a reminder about the webhook configuration, since a missing
+ * webhook registration means mirror_pending items will never resolve
+ * (Risk §8 item 2).
+ */
+async function checkLidarrOnStartup(): Promise<void> {
+  try {
+    const status = await systemStatus();
+    console.log(`[startup] Lidarr reachable — version ${status.version}`);
+    console.log(
+      '[startup] Reminder: ensure the Lidarr webhook is configured under ' +
+        'Settings → Connect → Webhook with events: On Download, On Upgrade.'
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `[startup] WARNING: Lidarr is not reachable (${msg}). ` +
+        'Mirror workflows will not function until Lidarr is configured in Settings.'
+    );
+  }
+}
+
+// ── Scheduler ─────────────────────────────────────────────────────────────────
+
 let _started = false;
 
 /** Schedule the next orphan scan run (recursive tail-schedule). */
@@ -156,4 +203,9 @@ export function startScheduler(): void {
   if (_started) return;
   _started = true;
   scheduleNextRun();
+  startSessionCleanup();
+  // Non-blocking — don't await; log warnings asynchronously.
+  checkLidarrOnStartup().catch((err) =>
+    console.error('[startup] Lidarr check failed unexpectedly:', err)
+  );
 }

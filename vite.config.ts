@@ -1,5 +1,5 @@
 import { sveltekit } from '@sveltejs/kit/vite';
-import { defineConfig } from 'vite';
+import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   plugins: [sveltekit()],
@@ -10,5 +10,11 @@ export default defineConfig({
   },
   server: {
     port: 5173
+  },
+  test: {
+    include: ['src/**/*.test.ts'],
+    environment: 'node',
+    // Run each test file in its own worker so module mocks don't bleed across files.
+    pool: 'forks',
   }
 });
