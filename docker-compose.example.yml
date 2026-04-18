@@ -23,6 +23,6 @@ services:
       # Lidarr root folders. All are mounted rw because any can become
       # an owner or a mirror target depending on which list adds first.
       - /mnt/user/media/music/parents:/mnt/music/parents
-      - /mnt/user/media/music/kids:/mnt/user/media/music/kids
+      - /mnt/user/media/music/kids:/mnt/music/kids
       # Add more root folders here as needed:
       # - /mnt/user/media/music/other:/mnt/music/other
