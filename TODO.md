@@ -159,13 +159,13 @@ Recommended order because search results need to show "in Lidarr" badges (OQ-5) 
 
 ---
 
-## Phase 4 — Hardening
+## Phase 4 — Hardening — COMPLETE
 
-- [ ] Request logging (structured, minimal)
-- [ ] Graceful shutdown — close DB, flush pending copies
-- [ ] Session cleanup job — call `cleanupExpiredSessions()` on a timer
-- [ ] Tests for the orchestrator's three scenarios (mock `fetch` for Lidarr)
-- [ ] Webhook reachability check on startup → warn in logs if unreachable (Risk §8 item 2)
+- [x] Request logging — structured JSON (`ts`, `method`, `path`, `status`, `ms`) in `hooks.server.ts`; skips Vite HMR + static asset paths
+- [x] Graceful shutdown — `src/lib/server/shutdown.ts` registers SIGTERM/SIGINT handlers; waits up to 15 s for in-flight mirror jobs via `flushPendingCopies()`, then closes DB cleanly
+- [x] Session cleanup job — hourly `setInterval` in `scheduler.ts` calls `cleanupExpiredSessions()`; timer is `.unref()`'d so it doesn't block process exit
+- [x] Orchestrator unit tests — `src/lib/server/orchestrator.test.ts` (Vitest); 13 tests covering all three scenarios with in-memory SQLite + vi.mock(); 13/13 passing
+- [x] Webhook reachability check on startup — `checkLidarrOnStartup()` in `scheduler.ts` calls `systemStatus()`; logs version if reachable, logs `WARNING` with webhook reminder if not
 - [ ] Docs: a short "Lidarr setup" section in README covering the Connect → Webhook config
 
 ---
