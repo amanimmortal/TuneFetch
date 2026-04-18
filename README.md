@@ -73,4 +73,15 @@ REQUIREMENTS.md         Full product + architecture spec
 
 ## Status
 
-Foundation scaffold only. See REQUIREMENTS.md sections 4B–4F for the feature work still to come (MusicBrainz search, list management, Lidarr orchestration, mirror engine, webhook handler, scheduler).
+**Phase 1B Complete.** The application includes:
+- Foundation scaffold (SQLite, SvelteKit, Auth, Tailwind).
+- Configurable Lidarr API client.
+- MusicBrainz API integration with rate-limit queueing.
+- A functional Search UI that tags matching Lidarr tracks automatically.
+
+**Up Next:**
+- Phase 2: Lists & Lidarr push orchestration (sending tracks to Lidarr).
+- Phase 3: Mirror engine (File copying background processor).
+- Phase 4: Hardening and Webhooks.
+
+See `TODO.md` and `REQUIREMENTS.md` for full breakdown.
