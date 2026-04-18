@@ -39,6 +39,9 @@ CREATE TABLE IF NOT EXISTS list_items (
   title            TEXT NOT NULL,
   artist_name      TEXT NOT NULL,
   album_name       TEXT,
+  -- For track/album items: the MB artist MBID so the orchestrator can auto-add
+  -- the artist to Lidarr (unmonitored) when it is not already present.
+  artist_mbid      TEXT,
   lidarr_artist_id INTEGER,
   lidarr_album_id  INTEGER,
   lidarr_track_id  INTEGER,

@@ -25,6 +25,15 @@ export function getDb(): Database.Database {
   db.pragma('foreign_keys = ON');
   db.exec(schemaSql);
 
+  // ── Safe migrations ──────────────────────────────────────────────────────
+  // Add columns that were introduced after initial schema without breaking
+  // existing databases. SQLite does not support IF NOT EXISTS on ALTER TABLE.
+  const listItemCols = (db.pragma('table_info(list_items)') as Array<{ name: string }>)
+    .map((c) => c.name);
+  if (!listItemCols.includes('artist_mbid')) {
+    db.exec('ALTER TABLE list_items ADD COLUMN artist_mbid TEXT');
+  }
+
   _db = db;
   return db;
 }

@@ -37,11 +37,13 @@ export const GET: RequestHandler = async ({ url }) => {
 			const arr = await searchAlbum(query);
 			results = arr.map((a) => {
 				const artistName = a['artist-credit']?.[0]?.artist?.name ?? 'Unknown Artist';
+				const artistMbid = a['artist-credit']?.[0]?.artist?.id ?? null;
 				return {
 					mbid: a.id,
 					type: 'album',
 					title: a.title,
 					artist: artistName,
+					artistMbid,
 					album: a.title,
 					inLidarr: false,
 					listMemberships: []
@@ -52,12 +54,14 @@ export const GET: RequestHandler = async ({ url }) => {
 			const arr = await searchTrack(query);
 			results = arr.map((a) => {
 				const artistName = a['artist-credit']?.[0]?.artist?.name ?? 'Unknown Artist';
+				const artistMbid = a['artist-credit']?.[0]?.artist?.id ?? null;
 				const albumName = a.releases?.[0]?.title ?? 'Unknown Album';
 				return {
 					mbid: a.id,
 					type: 'track',
 					title: a.title,
 					artist: artistName,
+					artistMbid,
 					album: albumName,
 					inLidarr: false,
 					listMemberships: []

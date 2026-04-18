@@ -26,6 +26,9 @@ export const actions: Actions = {
 		const title    = ((data.get('title')      as string | null) ?? '').trim();
 		const artistName = ((data.get('artistName') as string | null) ?? '').trim();
 		const albumName  = ((data.get('albumName')  as string | null) ?? '').trim() || null;
+		// Artist MBID for track/album items — used by orchestrator to auto-add
+		// the artist to Lidarr (monitor=none) when not already present.
+		const artistMbid = ((data.get('artistMbid') as string | null) ?? '').trim() || null;
 
 		if (!listId || !mbid || !type || !title || !artistName) {
 			return fail(400, { error: 'Missing required fields for adding to list.' });
@@ -39,10 +42,10 @@ export const actions: Actions = {
 		try {
 			const result = getDb()
 				.prepare(
-					`INSERT INTO list_items (list_id, mbid, type, title, artist_name, album_name)
-           VALUES (?, ?, ?, ?, ?, ?)`
+					`INSERT INTO list_items (list_id, mbid, type, title, artist_name, album_name, artist_mbid)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
 				)
-				.run(listId, mbid, type, title, artistName, albumName);
+				.run(listId, mbid, type, title, artistName, albumName, artistMbid);
 			newItemId = result.lastInsertRowid as number;
 		} catch {
 			return fail(500, { error: 'Database error — could not add item.' });

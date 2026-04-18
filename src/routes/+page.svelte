@@ -107,6 +107,7 @@
                <input type="hidden" name="title" value={r.title} />
                <input type="hidden" name="artistName" value={r.artist} />
                <input type="hidden" name="albumName" value={r.album || ''} />
+               <input type="hidden" name="artistMbid" value={r.artistMbid || ''} />
 
                {#if data.lists.length === 0}
                   <span class="text-sm text-slate-500 italic flex-1">No lists exist to add to.</span>

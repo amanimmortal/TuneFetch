@@ -32,6 +32,8 @@ interface ListItemRow {
 	title: string;
 	artist_name: string;
 	album_name: string | null;
+	/** MB artist MBID stored at add-time for track/album items. Used to auto-add artist to Lidarr. */
+	artist_mbid: string | null;
 	lidarr_artist_id: number | null;
 	lidarr_album_id: number | null;
 	lidarr_track_id: number | null;
@@ -137,7 +139,7 @@ export async function orchestrate(listItemId: number): Promise<void> {
 	// Load the item and its parent list
 	const item = db
 		.prepare(
-			`SELECT id, list_id, mbid, type, title, artist_name, album_name,
+			`SELECT id, list_id, mbid, type, title, artist_name, album_name, artist_mbid,
               lidarr_artist_id, lidarr_album_id, lidarr_track_id, sync_status
          FROM list_items WHERE id = ?`
 		)
@@ -232,67 +234,84 @@ async function scenarioA(item: ListItemRow, list: ListRow): Promise<void> {
 async function scenarioB(item: ListItemRow, list: ListRow): Promise<void> {
 	const db = getDb();
 
-	// We need the artist MBID from list_items.
-	// For a track item, we store the recording MBID in mbid,
-	// but artist information is in artist_name.
-	// We need Lidarr's artist lookup — try to find by artist_name heuristic
-	// using the lidarr_artist_id if already set, or the ownership table.
-	//
-	// Full artist-MBID-for-track lookup requires MusicBrainz data not stored here.
-	// For now: check if we have lidarr_artist_id already set (from a prior run),
-	// otherwise surface as a failure with a clear message.
-	//
-	// The search page stores artist_name; the orchestrator uses it to look up
-	// existing ownership by artist_name as a fallback.
+	// Resolve the Lidarr artist for this track.
+	// Resolution order:
+	//   1. lidarr_artist_id already stored on this item (e.g. from a prior retry)
+	//   2. artist_ownership table keyed by item.artist_mbid
+	//   3. Sibling list_items with same artist_name that have been synced
+	//   4. Auto-add via item.artist_mbid (monitor=none) — REQUIREMENTS §4D Scenario B
 
-	// Check if there's an existing artist in Lidarr matching this artist name
-	// via the ownership table (keyed by lidarr_artist_id on a prior item)
 	let lidarrArtistId = item.lidarr_artist_id;
-	let artistMbid: string | null = null;
-	let rootFolderPath = list.root_folder_path;
+	let resolvedArtistMbid: string | null = item.artist_mbid;
 
 	if (!lidarrArtistId) {
-		// Try ownership table by looking at other list_items with same artist_name
+		// Check ownership table directly by artist MBID
+		if (item.artist_mbid) {
+			const ownership = db
+				.prepare('SELECT * FROM artist_ownership WHERE artist_mbid = ?')
+				.get(item.artist_mbid) as OwnershipRow | undefined;
+			if (ownership) {
+				lidarrArtistId = ownership.lidarr_artist_id;
+			}
+		}
+	}
+
+	if (!lidarrArtistId) {
+		// Fallback: sibling list_items with the same artist_name that are synced
 		const related = db
 			.prepare(
-				`SELECT li.lidarr_artist_id, ao.artist_mbid, ao.root_folder_path
+				`SELECT li.lidarr_artist_id, ao.artist_mbid
            FROM list_items li
            JOIN artist_ownership ao ON ao.lidarr_artist_id = li.lidarr_artist_id
            WHERE li.artist_name = ? AND li.lidarr_artist_id IS NOT NULL
            LIMIT 1`
 			)
 			.get(item.artist_name) as
-			| { lidarr_artist_id: number; artist_mbid: string; root_folder_path: string }
+			| { lidarr_artist_id: number; artist_mbid: string }
 			| undefined;
-
 		if (related) {
 			lidarrArtistId = related.lidarr_artist_id;
-			artistMbid = related.artist_mbid;
-			rootFolderPath = related.root_folder_path;
+			resolvedArtistMbid = resolvedArtistMbid ?? related.artist_mbid;
 		}
 	}
 
-	// If we still don't have an artist ID, we need to add the artist unmonitored.
-	// We don't have the artist MBID from a track search here — mark as failed
-	// with a clear explanation so the caller can retry with more info.
 	if (!lidarrArtistId) {
-		markFailed(
-			item.id,
-			`Cannot push track to Lidarr: artist MBID not available. ` +
-				`Ensure the artist "${item.artist_name}" has been added to Lidarr first, ` +
-				`or add an artist-type item for this artist.`
-		);
-		return;
+		// Auto-add artist with monitor=none so only this track gets monitored.
+		// Requires artist_mbid stored at search time.
+		if (!item.artist_mbid) {
+			markFailed(
+				item.id,
+				`Cannot push track to Lidarr: artist MusicBrainz ID was not captured at search time. ` +
+					`Remove and re-add this item from the search page to fix this.`
+			);
+			return;
+		}
+
+		// Check whether the artist already exists in Lidarr (e.g. added via another path)
+		const existing = await getArtistByMbid(item.artist_mbid);
+		if (existing) {
+			lidarrArtistId = existing.id;
+			upsertOwnership(item.artist_mbid, existing.id, list.id, existing.rootFolderPath);
+		} else {
+			// Add artist to Lidarr with all albums unmonitored — we'll monitor only this track below
+			const lidarrArtist = await addArtist({
+				foreignArtistId: item.artist_mbid,
+				artistName: item.artist_name,
+				rootFolderPath: list.root_folder_path,
+				monitored: true,
+				addOptions: { monitor: 'none', searchForMissingAlbums: false }
+			});
+			lidarrArtistId = lidarrArtist.id;
+			upsertOwnership(item.artist_mbid, lidarrArtist.id, list.id, list.root_folder_path);
+		}
 	}
 
-	// Check ownership — is this artist in a different root folder?
-	if (artistMbid) {
+	// At this point lidarrArtistId is guaranteed non-null. Check cross-library.
+	if (resolvedArtistMbid) {
 		const ownership = db
 			.prepare('SELECT * FROM artist_ownership WHERE artist_mbid = ?')
-			.get(artistMbid) as OwnershipRow | undefined;
-
+			.get(resolvedArtistMbid) as OwnershipRow | undefined;
 		if (ownership && ownership.root_folder_path !== list.root_folder_path) {
-			// Cross-library track — flag for mirror
 			db.prepare(`UPDATE list_items SET lidarr_artist_id = ? WHERE id = ?`).run(
 				lidarrArtistId,
 				item.id
@@ -329,47 +348,76 @@ async function scenarioB(item: ListItemRow, list: ListRow): Promise<void> {
 async function scenarioC(item: ListItemRow, list: ListRow): Promise<void> {
 	const db = getDb();
 
-	// Same artist-lookup challenge as Scenario B.
-	// For album items, the mbid is the release-group MBID.
-	// We look for an existing Lidarr artist via related ownership.
+	// Same artist-resolution logic as Scenario B.
+	// item.mbid is the release-group MBID; item.artist_mbid is the artist MBID.
 
 	let lidarrArtistId = item.lidarr_artist_id;
-	let artistMbid: string | null = null;
+	let resolvedArtistMbid: string | null = item.artist_mbid;
 
 	if (!lidarrArtistId) {
+		// Check ownership table by artist MBID
+		if (item.artist_mbid) {
+			const ownership = db
+				.prepare('SELECT * FROM artist_ownership WHERE artist_mbid = ?')
+				.get(item.artist_mbid) as OwnershipRow | undefined;
+			if (ownership) {
+				lidarrArtistId = ownership.lidarr_artist_id;
+			}
+		}
+	}
+
+	if (!lidarrArtistId) {
+		// Fallback: sibling list_items with same artist_name
 		const related = db
 			.prepare(
-				`SELECT li.lidarr_artist_id, ao.artist_mbid, ao.root_folder_path
+				`SELECT li.lidarr_artist_id, ao.artist_mbid
            FROM list_items li
            JOIN artist_ownership ao ON ao.lidarr_artist_id = li.lidarr_artist_id
            WHERE li.artist_name = ? AND li.lidarr_artist_id IS NOT NULL
            LIMIT 1`
 			)
 			.get(item.artist_name) as
-			| { lidarr_artist_id: number; artist_mbid: string; root_folder_path: string }
+			| { lidarr_artist_id: number; artist_mbid: string }
 			| undefined;
-
 		if (related) {
 			lidarrArtistId = related.lidarr_artist_id;
-			artistMbid = related.artist_mbid;
+			resolvedArtistMbid = resolvedArtistMbid ?? related.artist_mbid;
 		}
 	}
 
 	if (!lidarrArtistId) {
-		markFailed(
-			item.id,
-			`Cannot push album to Lidarr: artist MBID not available. ` +
-				`Add an artist-type item for "${item.artist_name}" first.`
-		);
-		return;
+		// Auto-add artist with monitor=none so only this album gets monitored.
+		if (!item.artist_mbid) {
+			markFailed(
+				item.id,
+				`Cannot push album to Lidarr: artist MusicBrainz ID was not captured at search time. ` +
+					`Remove and re-add this item from the search page to fix this.`
+			);
+			return;
+		}
+
+		const existing = await getArtistByMbid(item.artist_mbid);
+		if (existing) {
+			lidarrArtistId = existing.id;
+			upsertOwnership(item.artist_mbid, existing.id, list.id, existing.rootFolderPath);
+		} else {
+			const lidarrArtist = await addArtist({
+				foreignArtistId: item.artist_mbid,
+				artistName: item.artist_name,
+				rootFolderPath: list.root_folder_path,
+				monitored: true,
+				addOptions: { monitor: 'none', searchForMissingAlbums: false }
+			});
+			lidarrArtistId = lidarrArtist.id;
+			upsertOwnership(item.artist_mbid, lidarrArtist.id, list.id, list.root_folder_path);
+		}
 	}
 
-	// Check ownership for cross-library scenario
-	if (artistMbid) {
+	// Cross-library check
+	if (resolvedArtistMbid) {
 		const ownership = db
 			.prepare('SELECT * FROM artist_ownership WHERE artist_mbid = ?')
-			.get(artistMbid) as OwnershipRow | undefined;
-
+			.get(resolvedArtistMbid) as OwnershipRow | undefined;
 		if (ownership && ownership.root_folder_path !== list.root_folder_path) {
 			db.prepare(`UPDATE list_items SET lidarr_artist_id = ? WHERE id = ?`).run(
 				lidarrArtistId,
