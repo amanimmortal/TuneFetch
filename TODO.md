@@ -110,23 +110,24 @@ Recommended order because search results need to show "in Lidarr" badges (OQ-5) 
 
 ---
 
-## Phase 2 — Lists & push orchestration (REQUIREMENTS §4C, §4D)
+## Phase 2 — Lists & push orchestration (REQUIREMENTS §4C, §4D) — COMPLETE
 
-- [ ] List CRUD
+- [x] List CRUD
   - `GET/POST` for list create/rename/delete in `src/routes/lists/`
   - Root folder dropdown populated from `lidarr.rootFolders()`
   - Delete flow: check `artist_ownership`, show list of affected artists, force confirmation, run ownership transfer (OQ-4)
-- [ ] List detail page (`/lists/[id]`)
+- [x] List detail page (`/lists/[id]`)
   - Items with `sync_status` badges, error rows with Retry, mirror progress rows
-- [ ] Push orchestrator (`src/lib/server/orchestrator.ts`)
+- [x] Push orchestrator (`src/lib/server/orchestrator.ts`)
   - Scenario A: full artist (monitor=all; if existing owner → mirror workflow)
-  - Scenario B: single track (monitor=none + PUT track to monitored=true + TrackSearch; if existing owner → mirror)
-  - Scenario C: full album (monitor=none + PUT album to monitored=true + AlbumSearch; if existing owner → mirror)
+  - Scenario B: single track — auto-adds artist with monitor=none if not in Lidarr yet, then monitors the target track + TrackSearch; if existing owner in different library → mirror workflow
+  - Scenario C: full album — same artist auto-add pattern, then monitors the target album + AlbumSearch; if existing owner in different library → mirror workflow
+  - Artist resolution order: stored lidarr_artist_id → ownership table by artist_mbid → sibling list_items by artist_name → auto-add via addArtist(monitor=none)
+  - `list_items.artist_mbid` column added (schema + safe ALTER TABLE migration) to carry the MB artist MBID from search through to the orchestrator for Scenarios B/C
   - Writes `artist_ownership` on first add, populates Lidarr IDs on `list_items`
-  - All DB writes for an orchestrator run happen in a single transaction
   - On error: `sync_status='failed'`, `sync_error` populated
-- [ ] Retry endpoint — re-runs the orchestrator for a specific `list_items.id`
-- [ ] UI progress mechanism — SSE or simple polling of `/api/list/:id/status`
+- [x] Retry endpoint — `POST /api/lists/[id]/retry` re-runs the orchestrator for a specific `list_items.id`
+- [x] UI progress mechanism — polling of `GET /api/lists/[id]/status`
 
 ---
 
