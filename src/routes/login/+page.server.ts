@@ -36,6 +36,13 @@ export const actions: Actions = {
       path: '/',
       httpOnly: true,
       sameSite: 'lax',
+      // SvelteKit defaults `secure` to true for non-localhost hosts, which
+      // causes browsers to silently drop the session cookie when the app is
+      // served over plain HTTP (e.g. on a LAN via the Unraid container).
+      // Key off the request protocol so it still opts into secure cookies
+      // behind an HTTPS proxy.
+      secure: url.protocol === 'https:',
+      expires: expiresAt,
       maxAge: Math.floor(SESSION_TTL_MS / 1000)
     });
 
