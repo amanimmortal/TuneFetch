@@ -37,33 +37,83 @@ export const handle: Handle = async ({ event, resolve }) => {
   event.locals.user = getSessionUser(sessionId);
 
   const { pathname } = event.url;
+  const isQuiet = pathname.startsWith('/@') || pathname.startsWith('/node_modules');
 
-  // If no admin user has been configured yet, force the user through
-  // a first-run setup flow.
-  if (userCount() === 0 && !pathname.startsWith('/setup') && !isPublic(pathname)) {
-    redirect(303, '/setup');
-  }
-
-  if (!event.locals.user && !isPublic(pathname)) {
-    const target = encodeURIComponent(pathname + event.url.search);
-    redirect(303, `/login?redirect=${target}`);
-  }
-
-  // ── Structured request logging ─────────────────────────────────────────────
-  const t0 = Date.now();
-  const response = await resolve(event);
-  const ms = Date.now() - t0;
-  // Skip logging for Vite HMR and static asset requests to reduce noise.
-  if (!pathname.startsWith('/@') && !pathname.startsWith('/node_modules')) {
+  // ── DEBUG: inbound request state (cookie + resolved user) ─────────────────
+  // Remove once the login-loop issue is fully diagnosed.
+  const rawCookieHdr = event.request.headers.get('cookie') ?? '';
+  const hasSessionCookieHdr = rawCookieHdr.includes(`${SESSION_COOKIE}=`);
+  if (!isQuiet) {
     console.log(
       JSON.stringify({
-        ts:     new Date().toISOString(),
+        ts: new Date().toISOString(),
+        tag: 'hooks.in',
         method: event.request.method,
-        path:   pathname,
-        status: response.status,
-        ms
+        path: pathname,
+        search: event.url.search,
+        proto: event.url.protocol,
+        host: event.request.headers.get('host'),
+        xfProto: event.request.headers.get('x-forwarded-proto'),
+        hasSessionCookieHdr,
+        sessionIdPresent: Boolean(sessionId),
+        userResolved: event.locals.user?.username ?? null
       })
     );
   }
-  return response;
+
+  const t0 = Date.now();
+  try {
+    // If no admin user has been configured yet, force the user through
+    // a first-run setup flow.
+    if (userCount() === 0 && !pathname.startsWith('/setup') && !isPublic(pathname)) {
+      redirect(303, '/setup');
+    }
+
+    if (!event.locals.user && !isPublic(pathname)) {
+      const target = encodeURIComponent(pathname + event.url.search);
+      redirect(303, `/login?redirect=${target}`);
+    }
+
+    const response = await resolve(event);
+    const ms = Date.now() - t0;
+    if (!isQuiet) {
+      const setCookieHdr = response.headers.get('set-cookie');
+      console.log(
+        JSON.stringify({
+          ts: new Date().toISOString(),
+          tag: 'hooks.out',
+          method: event.request.method,
+          path: pathname,
+          status: response.status,
+          ms,
+          setCookie: setCookieHdr ? setCookieHdr.slice(0, 240) : null
+        })
+      );
+    }
+    return response;
+  } catch (e) {
+    // Log redirects thrown from this handle (they bypass resolve() above
+    // so would otherwise be invisible in the docker log stream).
+    const ms = Date.now() - t0;
+    if (
+      e &&
+      typeof e === 'object' &&
+      'status' in e &&
+      'location' in e &&
+      !isQuiet
+    ) {
+      console.log(
+        JSON.stringify({
+          ts: new Date().toISOString(),
+          tag: 'hooks.redirectThrow',
+          method: event.request.method,
+          path: pathname,
+          status: (e as { status: number }).status,
+          location: (e as { location: string }).location,
+          ms
+        })
+      );
+    }
+    throw e;
+  }
 };
