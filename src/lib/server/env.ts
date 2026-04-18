@@ -7,6 +7,8 @@
  * session.
  */
 
+import { building } from '$app/environment';
+
 interface Env {
   /** Secret used for signing session cookies. Must be >= 32 chars. */
   SECRET: string;
@@ -19,6 +21,15 @@ interface Env {
 }
 
 function load(): Env {
+  if (building) {
+    return {
+      SECRET: 'dummy_secret_for_build_only_that_is_32_chars_long',
+      DATA_DIR: '/app/data',
+      ADMIN_USER: null,
+      ADMIN_PASSWORD: null
+    };
+  }
+
   const secret = process.env.TUNEFETCH_SECRET;
   if (!secret) {
     throw new Error(
