@@ -3,12 +3,11 @@
 
 services:
   tunefetch:
-    build: .
-    # image: ghcr.io/<you>/tunefetch:latest
+    image: ghcr.io/amanimmortal/tunefetch:latest
     container_name: tunefetch
     restart: unless-stopped
     ports:
-      - '3000:3000'
+      - '8282:3000'
     environment:
       # --- required ---
       TUNEFETCH_SECRET: 'change-me-to-a-random-string-of-at-least-32-chars'
