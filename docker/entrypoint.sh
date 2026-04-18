@@ -13,14 +13,11 @@ PGID="${PGID:-1000}"
 current_uid="$(id -u tunefetch 2>/dev/null || echo '')"
 current_gid="$(getent group tunefetch | awk -F: '{print $3}' 2>/dev/null || echo '')"
 
-if [ "$current_gid" != "$PGID" ]; then
-  # delgroup then addgroup to avoid GID conflicts.
+if [ "$current_uid" != "$PUID" ] || [ "$current_gid" != "$PGID" ]; then
+  # Remove user before group — Alpine won't delete a group with members.
+  deluser tunefetch 2>/dev/null || true
   delgroup tunefetch 2>/dev/null || true
   addgroup -g "$PGID" -S tunefetch
-fi
-
-if [ "$current_uid" != "$PUID" ]; then
-  deluser tunefetch 2>/dev/null || true
   adduser -u "$PUID" -S -G tunefetch tunefetch
 fi
 
