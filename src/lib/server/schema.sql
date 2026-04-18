@@ -82,3 +82,14 @@ CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+-- Orphan files found by the scheduled scan.
+-- A file is an orphan if it exists under a secondary (mirror) root folder
+-- but has no corresponding mirror_files record.
+-- Records are replaced on each scan run.
+CREATE TABLE IF NOT EXISTS orphan_files (
+  id          INTEGER PRIMARY KEY,
+  file_path   TEXT NOT NULL UNIQUE,
+  root_folder TEXT NOT NULL,
+  found_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+);

@@ -21,6 +21,7 @@ import {
 	updateTrack,
 	runCommand
 } from './lidarr';
+import { startBackfill } from './mirror';
 
 // ── DB row types ──────────────────────────────────────────────────────────────
 
@@ -216,12 +217,17 @@ async function scenarioA(item: ListItemRow, list: ListRow): Promise<void> {
 			.get(item.mbid) as OwnershipRow | undefined;
 
 		if (ownership && ownership.root_folder_path !== list.root_folder_path) {
-			// Cross-library add — flag for mirroring, do not trigger search
+			// Cross-library add — record the Lidarr ID and start background backfill.
+			// startBackfill sets status to mirror_active, copies existing files,
+			// then transitions to synced (or mirror_pending if no files yet).
 			db.prepare(`UPDATE list_items SET lidarr_artist_id = ? WHERE id = ?`).run(
 				existing.id,
 				item.id
 			);
 			markMirrorPending(item.id);
+			startBackfill(existing.id, item.id, ownership.root_folder_path, list.root_folder_path).catch(
+				(err) => console.error(`[orchestrator] backfill failed for item ${item.id}:`, err)
+			);
 		} else {
 			// Same root folder — just mark synced
 			markSynced(item.id, { lidarrArtistId: existing.id });
@@ -317,6 +323,9 @@ async function scenarioB(item: ListItemRow, list: ListRow): Promise<void> {
 				item.id
 			);
 			markMirrorPending(item.id);
+			startBackfill(lidarrArtistId, item.id, ownership.root_folder_path, list.root_folder_path).catch(
+				(err) => console.error(`[orchestrator] backfill failed for item ${item.id}:`, err)
+			);
 			return;
 		}
 	}
@@ -424,6 +433,9 @@ async function scenarioC(item: ListItemRow, list: ListRow): Promise<void> {
 				item.id
 			);
 			markMirrorPending(item.id);
+			startBackfill(lidarrArtistId, item.id, ownership.root_folder_path, list.root_folder_path).catch(
+				(err) => console.error(`[orchestrator] backfill failed for item ${item.id}:`, err)
+			);
 			return;
 		}
 	}

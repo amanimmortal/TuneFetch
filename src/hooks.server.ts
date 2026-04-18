@@ -7,6 +7,7 @@ import {
 } from '$lib/server/auth';
 // Importing env eagerly so the process fails fast if TUNEFETCH_SECRET is missing.
 import '$lib/server/env';
+import { startScheduler } from '$lib/server/scheduler';
 
 // Paths that are accessible without authentication.
 const PUBLIC_PREFIXES = ['/login', '/setup', '/api/webhook/'];
@@ -16,6 +17,9 @@ async function ensureSeed() {
   if (_seeded) return;
   _seeded = true;
   await maybeSeedAdmin();
+  // Start the nightly orphan scan scheduler on first request.
+  // startScheduler() is idempotent — safe to call here.
+  startScheduler();
 }
 
 function isPublic(pathname: string): boolean {
