@@ -131,26 +131,31 @@ Recommended order because search results need to show "in Lidarr" badges (OQ-5) 
 
 ---
 
-## Phase 3 — Mirror engine (REQUIREMENTS §4E, OQ-1, OQ-7)
+## Phase 3 — Mirror engine (REQUIREMENTS §4E, OQ-1, OQ-7) — COMPLETE
 
-- [ ] Mirror copy service (`src/lib/server/mirror.ts`)
-  - `copyFile(sourcePath, mirrorPath)` — creates intermediate dirs, atomic write (temp + rename)
-  - `mirrorAllForArtist(artistId, targetListId)` — enumerates Lidarr `trackfile` endpoint, copies each
-  - Background job runner — simple async queue in-process (v1 scope, single container)
-- [ ] Webhook handler (`src/routes/api/webhook/lidarr/+server.ts`)
-  - No auth (OQ-3). Internal network only — document in README.
-  - Handles `Download` and `Upgrade` events
-  - `Download` → for each list with this artist registered, copy file into secondary root
-  - `Upgrade` → find `mirror_files` where `source_path` matches, re-copy, mark `active`
-- [ ] Mirror health dashboard (`/mirrors`)
-  - List active / stale / orphan rows
-  - "Refresh Stale" button → re-copies all `status='stale'` rows
-  - "Scan Now" button → runs orphan detector on demand
-- [ ] Scheduled orphan scanner (REQUIREMENTS §4E, OQ-6)
-  - Read schedule from settings (`orphan_scan_time`, HH:MM)
-  - In-process scheduler fires once per day at configured time
-  - Walks secondary root folders, flags files with no matching `mirror_files` row
-  - Never auto-deletes — surfaces in the dashboard only
+- [x] Mirror copy service (`src/lib/server/mirror.ts`)
+  - `copyFile(sourcePath, destPath)` — atomic write via `.tunefetch.tmp` + rename, creates intermediate dirs
+  - `buildMirrorPath(sourcePath, ownerRoot, targetRoot)` — constructs mirror path by replacing root prefix
+  - `mirrorTrackFile(sourcePath, listItemId, ownerRoot, targetRoot)` — copies one file, upserts `mirror_files` row
+  - `remirrorUpgrade(oldSourcePath, newSourcePath)` — re-copies all mirrors when Lidarr upgrades a file; marks stale on failure
+  - `startBackfill(lidarrArtistId, listItemId, ownerRoot, targetRoot)` — fire-and-forget background job that enumerates all downloaded track files via Lidarr API and copies each; transitions list_item sync_status through mirror_active → synced (or mirror_pending if no files yet, mirror_broken on failure)
+- [x] Orchestrator updated to call `startBackfill()` at all three cross-library points (Scenarios A, B, C)
+- [x] Webhook handler (`src/routes/api/webhook/lidarr/+server.ts`)
+  - No auth (OQ-3, resolved). Register in Lidarr → Settings → Connect → Webhook, events: On Download + On Upgrade
+  - `eventType=Test` → 200 OK (Lidarr reachability test)
+  - `eventType=Download, isUpgrade=false` → queries `artist_ownership` for owner root, finds all secondary list_items for this artist, copies each new track file to each secondary root, updates `mirror_files`, flips `mirror_pending → synced`
+  - `eventType=Download, isUpgrade=true` → matches deleted files to new files by relativePath, calls `remirrorUpgrade`; marks mirrors stale if no new file can be matched
+- [x] Mirror health dashboard (`/mirrors`)
+  - Summary stats: total / active / stale / pending counts
+  - Stale and pending file tables (track title, list name, path)
+  - Active mirrors table (collapsed `<details>` to avoid UI overload, capped at 200 rows)
+  - "Refresh Stale" action → re-copies all stale rows, reports count
+  - "Scan Now" action → runs orphan detector immediately, shows result
+  - Orphan files table with last-scan timestamp
+- [x] Scheduled orphan scanner (`src/lib/server/scheduler.ts`)
+  - `runOrphanScan()` — walks all root folders used as mirror destinations (joined from mirror_files → list_items → lists), compares each file against `mirror_files.mirror_path`, records new orphans in `orphan_files` table (full replace on each scan)
+  - `startScheduler()` — idempotent, single setTimeout chain; reads `orphan_scan_time` from settings at each run; started from `hooks.server.ts` on first request
+- [x] `orphan_files` table added to schema.sql (idempotent CREATE TABLE IF NOT EXISTS)
 
 ---
 
