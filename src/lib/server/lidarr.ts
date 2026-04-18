@@ -30,6 +30,29 @@ export class LidarrError extends Error {
 	}
 }
 
+/**
+ * Undici's native fetch surfaces network failures as a plain Error with
+ * message "fetch failed". The actual cause (DNS, refused, TLS, timeout)
+ * lives in `err.cause`. Walk that chain into a single readable string.
+ */
+function describeFetchError(err: unknown): string {
+	const parts: string[] = [];
+	let node: unknown = err;
+	const seen = new Set<unknown>();
+	while (node && !seen.has(node)) {
+		seen.add(node);
+		if (node instanceof Error) {
+			const code = (node as { code?: string }).code;
+			parts.push(code ? `${node.message} [${code}]` : node.message);
+			node = (node as { cause?: unknown }).cause;
+		} else {
+			parts.push(String(node));
+			break;
+		}
+	}
+	return parts.join(' — caused by: ');
+}
+
 // ── Lidarr response types ─────────────────────────────────────────────────────
 
 export interface LidarrConfig {
@@ -162,8 +185,17 @@ async function request<T>(
 			signal: AbortSignal.timeout(15_000)
 		});
 	} catch (err: unknown) {
-		const msg = err instanceof Error ? err.message : String(err);
-		throw new LidarrError(`Network error contacting Lidarr: ${msg}`);
+		const detail = describeFetchError(err);
+		console.error(
+			JSON.stringify({
+				ts: new Date().toISOString(),
+				tag: 'lidarr.fetchError',
+				method,
+				url,
+				detail
+			})
+		);
+		throw new LidarrError(`Network error contacting Lidarr: ${detail}`);
 	}
 
 	const text = await response.text();

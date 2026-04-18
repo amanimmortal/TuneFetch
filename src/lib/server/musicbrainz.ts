@@ -13,6 +13,30 @@ export class MusicBrainzError extends Error {
 	}
 }
 
+/**
+ * Node's native fetch (undici) surfaces network failures as a plain Error
+ * whose message is just "fetch failed". The useful detail — DNS failure,
+ * connection refused, TLS error, etc. — hides in `err.cause`. This helper
+ * walks the cause chain and returns a single descriptive string.
+ */
+function describeFetchError(err: unknown): string {
+	const parts: string[] = [];
+	let node: unknown = err;
+	const seen = new Set<unknown>();
+	while (node && !seen.has(node)) {
+		seen.add(node);
+		if (node instanceof Error) {
+			const code = (node as { code?: string }).code;
+			parts.push(code ? `${node.message} [${code}]` : node.message);
+			node = (node as { cause?: unknown }).cause;
+		} else {
+			parts.push(String(node));
+			break;
+		}
+	}
+	return parts.join(' — caused by: ');
+}
+
 let lastRequestTime = 0;
 let queue: Promise<unknown> = Promise.resolve();
 
@@ -50,9 +74,10 @@ async function request<T>(path: string, query: Record<string, string>): Promise<
 	params.set('fmt', 'json');
 
 	return enqueue(async () => {
+		const fullUrl = `${BASE_URL}${path}?${params.toString()}`;
 		let response: Response;
 		try {
-			response = await fetch(`${BASE_URL}${path}?${params.toString()}`, {
+			response = await fetch(fullUrl, {
 				headers: {
 					'User-Agent': `TuneFetch/1.0 ( ${email} )`,
 					Accept: 'application/json'
@@ -60,8 +85,16 @@ async function request<T>(path: string, query: Record<string, string>): Promise<
 				signal: AbortSignal.timeout(15_000)
 			});
 		} catch (err: unknown) {
-			const msg = err instanceof Error ? err.message : String(err);
-			throw new MusicBrainzError(`Network error contacting MusicBrainz: ${msg}`);
+			const detail = describeFetchError(err);
+			console.error(
+				JSON.stringify({
+					ts: new Date().toISOString(),
+					tag: 'musicbrainz.fetchError',
+					url: fullUrl,
+					detail
+				})
+			);
+			throw new MusicBrainzError(`Network error contacting MusicBrainz: ${detail}`);
 		}
 
 		if (!response.ok) {
