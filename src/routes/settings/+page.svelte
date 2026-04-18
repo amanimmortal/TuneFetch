@@ -1,5 +1,6 @@
 <script lang="ts">
   import { enhance } from '$app/forms';
+  import type { SubmitFunction } from '@sveltejs/kit';
   import type { ActionData, PageData } from './$types';
 
   export let data: PageData;
@@ -19,6 +20,36 @@
   $: saved           = (f?.saved        as boolean | undefined) ?? false;
   $: isOk  = connectionStatus === 'ok';
   $: isErr = connectionStatus === 'error';
+
+  // Submit handler is declared in the script block (not inline in the
+  // attribute) so TypeScript syntax like `as` casts is allowed. The Svelte
+  // compiler parses attribute expressions with plain acorn, which rejects
+  // TS-only syntax even when <script lang="ts"> is set.
+  const handleSubmit: SubmitFunction = ({ submitter }) => {
+    // Detect which button triggered the submit so the correct button
+    // shows its pending label. formaction overrides the form's action
+    // on per-button basis, so we key off the submitter element.
+    const formaction =
+      submitter instanceof HTMLButtonElement
+        ? submitter.getAttribute('formaction') ?? ''
+        : '';
+    const isTest = formaction.includes('testConnection');
+    if (isTest) {
+      testPending = true;
+    } else {
+      savePending = true;
+    }
+    return async ({ update }) => {
+      try {
+        await update();
+      } finally {
+        // Always clear both — a thrown action or slow connection
+        // must not leave the button stuck on "Testing…".
+        savePending = false;
+        testPending = false;
+      }
+    };
+  };
 </script>
 
 <svelte:head>
@@ -37,29 +68,7 @@
     class="card space-y-4"
     method="POST"
     action="?/save"
-    use:enhance={({ submitter }) => {
-      // Detect which button triggered the submit so the correct button
-      // shows its pending label. formaction overrides the form's action
-      // on per-button basis, so we key off the submitter element.
-      const btn = submitter as HTMLButtonElement | null;
-      const isTest =
-        (btn?.getAttribute('formaction') ?? '').includes('testConnection');
-      if (isTest) {
-        testPending = true;
-      } else {
-        savePending = true;
-      }
-      return async ({ update }) => {
-        try {
-          await update();
-        } finally {
-          // Always clear both — a thrown action or slow connection
-          // must not leave the button stuck on "Testing…".
-          savePending = false;
-          testPending = false;
-        }
-      };
-    }}
+    use:enhance={handleSubmit}
   >
     <div>
       <label for="lidarr_url" class="mb-1 block text-sm font-medium text-slate-300">
