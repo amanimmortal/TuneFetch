@@ -12,7 +12,12 @@ WORKDIR /build
 
 # Install deps first (cache-friendly).
 COPY package.json package-lock.json* ./
-RUN npm ci
+# npm ci requires ALL platform-specific optional packages to be in the lock file.
+# Since the lock file is generated on Windows (missing Linux optionals), ci always
+# fails in the Alpine builder. npm install uses the lock file for version pinning
+# but resolves missing platform binaries itself — the correct pattern for
+# cross-platform Docker builds.
+RUN npm install
 
 # Copy the rest of the source and build.
 COPY . .
