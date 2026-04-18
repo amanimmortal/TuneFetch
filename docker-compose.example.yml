@@ -16,6 +16,9 @@ services:
       # --- optional first-run admin seed ---
       TUNEFETCH_ADMIN_USER: 'admin'
       TUNEFETCH_ADMIN_PASSWORD: 'change-me'
+      # Set to 'false' for a plain-HTTP LAN deployment (default 'auto'
+      # can misbehave when adapter-node reports url.protocol as https).
+      TUNEFETCH_COOKIE_SECURE: 'false'
     volumes:
       # Persistent app data (SQLite DB + any runtime config).
       - /mnt/user/appdata/tunefetch:/app/data

@@ -7,6 +7,7 @@ import {
   getUserByUsername,
   verifyPassword
 } from '$lib/server/auth';
+import { env, resolveCookieSecure } from '$lib/server/env';
 
 export const load: PageServerLoad = async ({ locals, url }) => {
   if (locals.user) {
@@ -75,12 +76,12 @@ export const actions: Actions = {
       path: '/',
       httpOnly: true,
       sameSite: 'lax' as const,
-      // SvelteKit defaults `secure` to true for non-localhost hosts, which
-      // causes browsers to silently drop the session cookie when the app is
-      // served over plain HTTP (e.g. on a LAN via the Unraid container).
-      // Key off the request protocol so it still opts into secure cookies
-      // behind an HTTPS proxy.
-      secure: url.protocol === 'https:',
+      // `secure` is driven by the TUNEFETCH_COOKIE_SECURE env var (default:
+      // auto, which follows url.protocol). Keeping cookie security as an
+      // explicit deployment decision avoids the LAN-over-HTTP login loop
+      // caused by adapter-node reporting url.protocol as https: when it
+      // shouldn't.
+      secure: resolveCookieSecure(url),
       expires: expiresAt,
       maxAge: Math.floor(SESSION_TTL_MS / 1000)
     };
@@ -91,6 +92,7 @@ export const actions: Actions = {
         tag: 'login.cookieSet',
         cookieName: SESSION_COOKIE,
         secure: cookieOpts.secure,
+        cookieSecureMode: env.COOKIE_SECURE,
         sameSite: cookieOpts.sameSite,
         httpOnly: cookieOpts.httpOnly,
         path: cookieOpts.path,
