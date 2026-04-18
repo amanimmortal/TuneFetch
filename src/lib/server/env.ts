@@ -8,6 +8,28 @@
  */
 
 import { building } from '$app/environment';
+import { setDefaultResultOrder } from 'node:dns';
+
+/**
+ * Node's native fetch uses happy-eyeballs: it tries AAAA (IPv6) and A (IPv4)
+ * addresses in parallel. In Docker user-defined bridge networks the
+ * container often has an IPv6 address but no working IPv6 route, which
+ * makes the v6 attempt fail instantly with ETIMEDOUT before the v4
+ * attempt can finish. The symptom is: LAN IPv4 hosts work, public
+ * hostnames fail with sub-second ETIMEDOUT. Forcing IPv4-first ordering
+ * sidesteps the problem without requiring host-level network changes.
+ *
+ * This has to run before any fetch is made, which is why it lives at
+ * module top-level in env.ts (imported eagerly from hooks.server.ts).
+ * Skipped during build to avoid touching global state in the bundler.
+ */
+if (!building) {
+	try {
+		setDefaultResultOrder('ipv4first');
+	} catch (err) {
+		console.warn('[env] setDefaultResultOrder(ipv4first) failed:', err);
+	}
+}
 
 type CookieSecureMode = 'auto' | 'true' | 'false';
 

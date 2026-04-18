@@ -37,12 +37,27 @@
     class="card space-y-4"
     method="POST"
     action="?/save"
-    use:enhance={() => {
-      savePending = true;
+    use:enhance={({ submitter }) => {
+      // Detect which button triggered the submit so the correct button
+      // shows its pending label. formaction overrides the form's action
+      // on per-button basis, so we key off the submitter element.
+      const btn = submitter as HTMLButtonElement | null;
+      const isTest =
+        (btn?.getAttribute('formaction') ?? '').includes('testConnection');
+      if (isTest) {
+        testPending = true;
+      } else {
+        savePending = true;
+      }
       return async ({ update }) => {
-        await update();
-        savePending = false;
-        testPending = false;
+        try {
+          await update();
+        } finally {
+          // Always clear both — a thrown action or slow connection
+          // must not leave the button stuck on "Testing…".
+          savePending = false;
+          testPending = false;
+        }
       };
     }}
   >
@@ -119,7 +134,6 @@
         formaction="?/testConnection"
         class="btn-secondary"
         disabled={savePending || testPending}
-        on:click={() => { testPending = true; }}
       >
         {testPending ? 'Testing…' : 'Test Lidarr connection'}
       </button>
