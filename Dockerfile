@@ -25,6 +25,7 @@ FROM node:20-alpine AS runtime
 # user before exec'ing node, so any files the app writes (DB, copies)
 # get the correct ownership on the Unraid host.
 RUN apk add --no-cache su-exec libc6-compat tini \
+  && deluser --remove-home node \
   && addgroup -g 1000 -S tunefetch \
   && adduser -u 1000 -S -G tunefetch tunefetch
 
