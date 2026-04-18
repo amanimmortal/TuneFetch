@@ -57,31 +57,77 @@ docker compose up -d --build
 | `TUNEFETCH_ADMIN_USER` | no | Pre-seed admin username. |
 | `TUNEFETCH_ADMIN_PASSWORD` | no | Pre-seed admin password (hashed on first run). |
 
+## Lidarr webhook setup
+
+TuneFetch needs to receive events from Lidarr when files are downloaded or upgraded, so it can copy them into secondary library folders automatically.
+
+In Lidarr, go to **Settings → Connect → + (Add) → Webhook** and configure:
+
+| Field | Value |
+| --- | --- |
+| Name | TuneFetch |
+| URL | `http://<tunefetch-host>:3000/api/webhook/lidarr` |
+| Method | POST |
+| On Download | ✓ |
+| On Upgrade | ✓ |
+
+No shared secret is required — TuneFetch and Lidarr share the same Docker host and communicate over the internal network. Use the **Test** button in Lidarr to verify the connection.
+
 ## Project layout
 
 ```
 src/
-  app.html              HTML shell
-  app.css               Tailwind entry + component classes
-  hooks.server.ts       Auth gate, first-run redirect, env validation
-  lib/server/           DB, auth, env, settings — server-only code
-  routes/               UI routes (+page.svelte) and API routes (+server.ts)
-Dockerfile              Multi-stage build, Alpine, PUID/PGID aware
+  app.html                  HTML shell
+  app.css                   Tailwind entry + component classes
+  hooks.server.ts           Auth gate, first-run setup redirect, scheduler startup
+  lib/server/
+    auth.ts                 Argon2id password hashing, session management
+    db.ts                   SQLite singleton (better-sqlite3, WAL, safe migrations)
+    env.ts                  Fail-fast env validation (TUNEFETCH_SECRET)
+    lidarr.ts               Typed Lidarr API v1 client
+    mirror.ts               File copy service — atomic copies, backfill, re-mirror on upgrade
+    musicbrainz.ts          MusicBrainz search client with 1 req/sec queue
+    orchestrator.ts         Lidarr push logic — Scenarios A/B/C, artist ownership, backfill trigger
+    scheduler.ts            Nightly orphan scan scheduler + runOrphanScan()
+    settings.ts             Key/value settings store
+    schema.sql              SQLite schema (idempotent, applied on boot)
+  routes/
+    +page.svelte            Search UI (MusicBrainz search → add to list)
+    lists/                  List CRUD + detail pages
+    mirrors/                Mirror health dashboard
+    settings/               Lidarr URL/API key, admin email, orphan scan time
+    api/
+      search/               GET — MusicBrainz + Lidarr badge lookup
+      lists/[id]/
+        retry/              POST — re-run orchestrator for a failed item
+        status/             GET — poll sync_status for all items in a list
+      webhook/lidarr/       POST — Lidarr Download/Upgrade webhook receiver
+Dockerfile                  Multi-stage build, Alpine, PUID/PGID aware
 docker-compose.example.yml
-REQUIREMENTS.md         Full product + architecture spec
+REQUIREMENTS.md             Full product + architecture spec
+TODO.md                     Implementation status per phase
 ```
 
-## Status
+## Current status
 
-**Phase 1B Complete.** The application includes:
-- Foundation scaffold (SQLite, SvelteKit, Auth, Tailwind).
-- Configurable Lidarr API client.
-- MusicBrainz API integration with rate-limit queueing.
-- A functional Search UI that tags matching Lidarr tracks automatically.
+**Phases 0–3 complete.** The application is functionally complete for its core use case:
 
-**Up Next:**
-- Phase 2: Lists & Lidarr push orchestration (sending tracks to Lidarr).
-- Phase 3: Mirror engine (File copying background processor).
-- Phase 4: Hardening and Webhooks.
+- Foundation scaffold (SvelteKit, SQLite, Auth, Tailwind, Docker).
+- Configurable Lidarr API client with full v1 coverage needed for orchestration.
+- MusicBrainz search with 1 req/sec rate-limit queue and In Lidarr / list membership badges.
+- Full search UI: find any artist/album/track and add it to a list in one action.
+- List management: create, rename, delete (with ownership transfer confirmation).
+- Push orchestrator: three scenarios covering artist adds, single track adds, and album adds. Artists not yet in Lidarr are added automatically (unmonitored) before the specific track or album is monitored.
+- Mirror engine: when an artist is owned by another list's library, files are copied into the secondary root folder. Background backfill handles existing files; the Lidarr webhook handles new downloads and upgrades.
+- Mirror health dashboard: active/stale/pending file tables, Refresh Stale action, on-demand and scheduled orphan detection.
 
-See `TODO.md` and `REQUIREMENTS.md` for full breakdown.
+**Up next — Phase 4: Hardening**
+
+- Structured request logging.
+- Graceful shutdown (DB close, flush pending copies).
+- Session cleanup job.
+- Orchestrator unit tests (mock Lidarr fetch).
+- Webhook reachability check on startup.
+- Lidarr setup section in this README.
+
+See `TODO.md` for the full breakdown.
