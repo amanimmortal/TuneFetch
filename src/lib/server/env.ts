@@ -9,6 +9,7 @@
 
 import { building } from '$app/environment';
 import { setDefaultResultOrder } from 'node:dns';
+import { Agent, setGlobalDispatcher } from 'undici';
 
 /**
  * Node's native fetch uses happy-eyeballs: it tries AAAA (IPv6) and A (IPv4)
@@ -16,11 +17,22 @@ import { setDefaultResultOrder } from 'node:dns';
  * container often has an IPv6 address but no working IPv6 route, which
  * makes the v6 attempt fail instantly with ETIMEDOUT before the v4
  * attempt can finish. The symptom is: LAN IPv4 hosts work, public
- * hostnames fail with sub-second ETIMEDOUT. Forcing IPv4-first ordering
- * sidesteps the problem without requiring host-level network changes.
+ * hostnames (musicbrainz.org, etc.) fail with sub-second ETIMEDOUT.
  *
- * This has to run before any fetch is made, which is why it lives at
- * module top-level in env.ts (imported eagerly from hooks.server.ts).
+ * Two belt-and-braces mitigations, applied in order:
+ *
+ * 1. `setDefaultResultOrder('ipv4first')` — changes the order in which
+ *    `dns.lookup` returns addresses. Only affects code paths that use
+ *    `dns.lookup` directly.
+ *
+ * 2. Replace undici's global dispatcher with one that pins the TCP
+ *    `connect` family to 4. This guarantees every outbound fetch uses
+ *    IPv4 regardless of DNS result order or undici's happy-eyeballs
+ *    scheduler. This is the authoritative fix — `setDefaultResultOrder`
+ *    alone did not stop the ETIMEDOUT on the Unraid deploy target.
+ *
+ * Both run at module top-level in env.ts (imported eagerly from
+ * hooks.server.ts) so they apply before any fetch is made.
  * Skipped during build to avoid touching global state in the bundler.
  */
 if (!building) {
@@ -28,6 +40,16 @@ if (!building) {
 		setDefaultResultOrder('ipv4first');
 	} catch (err) {
 		console.warn('[env] setDefaultResultOrder(ipv4first) failed:', err);
+	}
+	try {
+		setGlobalDispatcher(
+			new Agent({
+				connect: { family: 4 }
+			})
+		);
+		console.log('[env] undici dispatcher pinned to IPv4 (family=4).');
+	} catch (err) {
+		console.warn('[env] setGlobalDispatcher(family=4) failed:', err);
 	}
 }
 

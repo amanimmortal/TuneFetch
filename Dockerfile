@@ -50,7 +50,15 @@ ENV NODE_ENV=production \
     PORT=3000 \
     TUNEFETCH_DATA_DIR=/app/data \
     PUID=1000 \
-    PGID=1000
+    PGID=1000 \
+    # Docker bridge networks often hand the container an IPv6 address with
+    # no working v6 route. Node's happy-eyeballs then fails AAAA in
+    # milliseconds with ETIMEDOUT, which surfaces as "MusicBrainz fetch
+    # failed" despite IPv4 being fine. --dns-result-order=ipv4first is the
+    # lowest-possible-level fix (applied before any JS runs). The undici
+    # dispatcher override in src/lib/server/env.ts is the belt to this
+    # braces.
+    NODE_OPTIONS="--dns-result-order=ipv4first"
 
 EXPOSE 3000
 VOLUME ["/app/data"]

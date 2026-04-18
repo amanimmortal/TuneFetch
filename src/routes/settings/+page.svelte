@@ -41,7 +41,11 @@
     }
     return async ({ update }) => {
       try {
-        await update();
+        // reset: false — the default SvelteKit behaviour clears all form
+        // inputs after a successful action, which wipes the Settings
+        // values from the UI until the next refresh. We want the inputs
+        // to keep showing whatever was just submitted.
+        await update({ reset: false });
       } finally {
         // Always clear both — a thrown action or slow connection
         // must not leave the button stuck on "Testing…".
