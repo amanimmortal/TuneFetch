@@ -300,9 +300,14 @@ export function getTracks(artistId: number, fetchFn?: FetchFn): Promise<LidarrTr
 /**
  * Update a track record (e.g. set monitored = true for Scenario B).
  * Pass the full track object back.
+ *
+ * NOTE: Lidarr does not expose a single-resource PUT for tracks.
+ * The correct endpoint is PUT /api/v1/track (no ID) with an array body.
+ * Returns the first (and only) updated track from the response array.
  */
-export function updateTrack(track: LidarrTrack, fetchFn?: FetchFn): Promise<LidarrTrack> {
-	return request<LidarrTrack>('PUT', `/api/v1/track/${track.id}`, track, fetchFn);
+export async function updateTrack(track: LidarrTrack, fetchFn?: FetchFn): Promise<LidarrTrack> {
+	const results = await request<LidarrTrack[]>('PUT', '/api/v1/track', [track], fetchFn);
+	return results[0];
 }
 
 /**
