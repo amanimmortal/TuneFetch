@@ -62,7 +62,11 @@ interface OwnershipRow {
  * Always runs outside any outer transaction so partial failures are recorded.
  */
 function markFailed(itemId: number, error: unknown): void {
-	const message = error instanceof Error ? error.message : String(error);
+	let message = error instanceof Error ? error.message : String(error);
+	// Append Lidarr's response body so the UI shows the actual API error, not just the status code.
+	if (error instanceof LidarrError && error.body) {
+		message += `\n${error.body}`;
+	}
 	getDb()
 		.prepare(
 			`UPDATE list_items SET sync_status = 'failed', sync_error = ? WHERE id = ?`
