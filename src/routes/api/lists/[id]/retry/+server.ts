@@ -5,15 +5,15 @@ import { orchestrate } from '$lib/server/orchestrator';
 
 /**
  * POST /api/lists/[id]/retry
- * Body (form-encoded): item_id=<list_items.id>
+ * Body (JSON): { "item_id": <list_items.id> }
  *
  * Re-runs the orchestrator for a specific failed/broken list_item.
- * Returns immediately — UI polls /api/lists/[id]/status for result.
+ * Returns immediately — orchestration runs in the background.
  */
 export const POST: RequestHandler = async ({ request, params }) => {
 	const listId = Number(params.id);
-	const formData = await request.formData();
-	const itemId = Number(formData.get('item_id'));
+	const body = await request.json();
+	const itemId = Number(body?.item_id);
 
 	if (isNaN(itemId) || itemId <= 0) {
 		error(400, 'Missing or invalid item_id');

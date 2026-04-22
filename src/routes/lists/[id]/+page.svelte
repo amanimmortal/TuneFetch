@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { PageData } from './$types';
+  import { invalidateAll } from '$app/navigation';
 
   export let data: PageData;
 
@@ -22,6 +23,25 @@
     album:  'Album',
     track:  'Track'
   };
+
+  // Track which items are currently being retried
+  const retrying = new Set<number>();
+
+  async function retryItem(itemId: number) {
+    retrying.add(itemId);
+    retrying = retrying; // trigger reactivity
+    try {
+      await fetch(`/api/lists/${data.list.id}/retry`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ item_id: itemId })
+      });
+      await invalidateAll();
+    } finally {
+      retrying.delete(itemId);
+      retrying = retrying;
+    }
+  }
 </script>
 
 <svelte:head>
@@ -74,10 +94,13 @@
               <span class="badge {cfg.classes}">{cfg.label}</span>
 
               {#if item.sync_status === 'failed' || item.sync_status === 'mirror_broken'}
-                <form method="POST" action="/api/lists/{data.list.id}/retry" target="_self">
-                  <input type="hidden" name="item_id" value={item.id} />
-                  <button type="submit" class="btn-secondary text-xs py-1 px-2">Retry</button>
-                </form>
+                <button
+                  class="btn-secondary text-xs py-1 px-2 disabled:opacity-50"
+                  disabled={retrying.has(item.id)}
+                  on:click={() => retryItem(item.id)}
+                >
+                  {retrying.has(item.id) ? 'Retrying…' : 'Retry'}
+                </button>
               {/if}
             </div>
           </div>
