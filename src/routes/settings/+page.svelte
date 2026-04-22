@@ -9,48 +9,40 @@
   // Track which action is in-flight for per-button loading state
   let savePending = false;
   let testPending = false;
+  let testPlexPending = false;
 
   // Derive typed values from the opaque ActionData union.
-  // Using 'as' casts here is safe: the server always returns these keys
-  // (or undefined), and we default-coerce below.
   $: f = form as Record<string, unknown> | null;
   $: formError       = (f?.error       as string  | undefined) ?? null;
   $: connectionStatus = (f?.connectionStatus as string  | undefined) ?? null;
   $: connectionMessage = (f?.connectionMessage as string  | undefined) ?? null;
+  $: plexConnectionStatus = (f?.plexConnectionStatus as string | undefined) ?? null;
+  $: plexConnectionMessage = (f?.plexConnectionMessage as string | undefined) ?? null;
   $: saved           = (f?.saved        as boolean | undefined) ?? false;
   $: isOk  = connectionStatus === 'ok';
   $: isErr = connectionStatus === 'error';
+  $: plexIsOk  = plexConnectionStatus === 'ok';
+  $: plexIsErr = plexConnectionStatus === 'error';
 
-  // Submit handler is declared in the script block (not inline in the
-  // attribute) so TypeScript syntax like `as` casts is allowed. The Svelte
-  // compiler parses attribute expressions with plain acorn, which rejects
-  // TS-only syntax even when <script lang="ts"> is set.
   const handleSubmit: SubmitFunction = ({ submitter }) => {
-    // Detect which button triggered the submit so the correct button
-    // shows its pending label. formaction overrides the form's action
-    // on per-button basis, so we key off the submitter element.
     const formaction =
       submitter instanceof HTMLButtonElement
         ? submitter.getAttribute('formaction') ?? ''
         : '';
-    const isTest = formaction.includes('testConnection');
-    if (isTest) {
+    if (formaction.includes('testPlexConnection')) {
+      testPlexPending = true;
+    } else if (formaction.includes('testConnection')) {
       testPending = true;
     } else {
       savePending = true;
     }
     return async ({ update }) => {
       try {
-        // reset: false — the default SvelteKit behaviour clears all form
-        // inputs after a successful action, which wipes the Settings
-        // values from the UI until the next refresh. We want the inputs
-        // to keep showing whatever was just submitted.
         await update({ reset: false });
       } finally {
-        // Always clear both — a thrown action or slow connection
-        // must not leave the button stuck on "Testing…".
         savePending = false;
         testPending = false;
+        testPlexPending = false;
       }
     };
   };
@@ -64,7 +56,7 @@
   <header>
     <h1 class="text-2xl font-semibold tracking-tight">Settings</h1>
     <p class="mt-1 text-sm text-slate-400">
-      Lidarr connection, admin contact email, and scheduled jobs.
+      Lidarr connection, Plex integration, admin contact email, and scheduled jobs.
     </p>
   </header>
 
@@ -74,6 +66,9 @@
     action="?/save"
     use:enhance={handleSubmit}
   >
+    <!-- ── Lidarr ─────────────────────────────────────────────────────── -->
+    <h2 class="text-lg font-medium text-slate-200 border-b border-slate-700 pb-2">Lidarr</h2>
+
     <div>
       <label for="lidarr_url" class="mb-1 block text-sm font-medium text-slate-300">
         Lidarr URL
@@ -102,6 +97,133 @@
         autocomplete="off"
       />
     </div>
+
+    <div>
+      <button
+        type="submit"
+        formaction="?/testConnection"
+        class="btn-secondary"
+        disabled={savePending || testPending || testPlexPending}
+      >
+        {testPending ? 'Testing…' : 'Test Lidarr connection'}
+      </button>
+    </div>
+
+    {#if connectionStatus}
+      <div
+        class="flex items-start gap-2 rounded-lg border px-3 py-2 text-sm
+          {isOk
+            ? 'border-green-700 bg-green-950 text-green-300'
+            : isErr
+            ? 'border-red-700 bg-red-950 text-red-300'
+            : 'border-slate-600 bg-slate-800 text-slate-400'}"
+      >
+        <span class="mt-px select-none text-base leading-none">
+          {isOk ? '✓' : isErr ? '✗' : '—'}
+        </span>
+        <span>{connectionMessage}</span>
+      </div>
+    {/if}
+
+    <!-- ── Plex ───────────────────────────────────────────────────────── -->
+    <h2 class="text-lg font-medium text-slate-200 border-b border-slate-700 pb-2 mt-6">Plex</h2>
+
+    <div>
+      <label for="plex_url" class="mb-1 block text-sm font-medium text-slate-300">
+        Plex URL
+      </label>
+      <input
+        id="plex_url"
+        name="plex_url"
+        type="url"
+        placeholder="http://192.168.1.10:32400"
+        value={data.settings.plexUrl}
+        class="input"
+        autocomplete="off"
+      />
+      <p class="mt-1 text-xs text-slate-500">
+        Local address of your Plex Media Server.
+      </p>
+    </div>
+
+    <div>
+      <label for="plex_admin_token" class="mb-1 block text-sm font-medium text-slate-300">
+        Plex Admin Token
+      </label>
+      <input
+        id="plex_admin_token"
+        name="plex_admin_token"
+        type="password"
+        value={data.settings.plexAdminToken}
+        class="input"
+        autocomplete="off"
+      />
+      <p class="mt-1 text-xs text-slate-500">
+        The X-Plex-Token for the server admin account. Find it in Plex → Settings → Network → XML link.
+      </p>
+    </div>
+
+    <div>
+      <label for="plex_library_section_id" class="mb-1 block text-sm font-medium text-slate-300">
+        Music Library Section ID
+      </label>
+      <input
+        id="plex_library_section_id"
+        name="plex_library_section_id"
+        type="text"
+        placeholder="e.g. 3"
+        value={data.settings.plexLibrarySectionId}
+        class="input"
+        autocomplete="off"
+      />
+      <p class="mt-1 text-xs text-slate-500">
+        The numeric ID of your Plex music library section. Test the connection first, then check your library sections.
+      </p>
+    </div>
+
+    <div>
+      <button
+        type="submit"
+        formaction="?/testPlexConnection"
+        class="btn-secondary"
+        disabled={savePending || testPending || testPlexPending}
+      >
+        {testPlexPending ? 'Testing…' : 'Test Plex connection'}
+      </button>
+    </div>
+
+    {#if plexConnectionStatus}
+      <div
+        class="flex items-start gap-2 rounded-lg border px-3 py-2 text-sm
+          {plexIsOk
+            ? 'border-green-700 bg-green-950 text-green-300'
+            : plexIsErr
+            ? 'border-red-700 bg-red-950 text-red-300'
+            : 'border-slate-600 bg-slate-800 text-slate-400'}"
+      >
+        <span class="mt-px select-none text-base leading-none">
+          {plexIsOk ? '✓' : plexIsErr ? '✗' : '—'}
+        </span>
+        <span>{plexConnectionMessage}</span>
+      </div>
+    {/if}
+
+    <div>
+      <a
+        href="/settings/plex-mappings"
+        class="inline-flex items-center gap-1.5 text-sm text-purple-400 hover:text-purple-300 transition-colors"
+      >
+        <span>👤</span>
+        <span>Manage Plex User Mappings</span>
+        <span class="text-slate-500">→</span>
+      </a>
+      <p class="mt-0.5 text-xs text-slate-500">
+        Map Lidarr root folders to Plex users so playlists target the correct accounts.
+      </p>
+    </div>
+
+    <!-- ── General ────────────────────────────────────────────────────── -->
+    <h2 class="text-lg font-medium text-slate-200 border-b border-slate-700 pb-2 mt-6">General</h2>
 
     <div>
       <label for="admin_contact_email" class="mb-1 block text-sm font-medium text-slate-300">
@@ -137,18 +259,9 @@
     </div>
 
     <!-- Action buttons -->
-    <div class="flex flex-wrap items-center gap-3">
-      <button type="submit" class="btn-primary" disabled={savePending || testPending}>
-        {savePending ? 'Saving…' : 'Save'}
-      </button>
-
-      <button
-        type="submit"
-        formaction="?/testConnection"
-        class="btn-secondary"
-        disabled={savePending || testPending}
-      >
-        {testPending ? 'Testing…' : 'Test Lidarr connection'}
+    <div class="flex flex-wrap items-center gap-3 pt-2 border-t border-slate-700">
+      <button type="submit" class="btn-primary" disabled={savePending || testPending || testPlexPending}>
+        {savePending ? 'Saving…' : 'Save all settings'}
       </button>
     </div>
 
@@ -157,29 +270,10 @@
       <p class="text-sm text-red-400">{formError}</p>
     {/if}
 
-    <!-- Connection status banner -->
-    {#if connectionStatus}
-      <div
-        class="flex items-start gap-2 rounded-lg border px-3 py-2 text-sm
-          {isOk
-            ? 'border-green-700 bg-green-950 text-green-300'
-            : isErr
-            ? 'border-red-700 bg-red-950 text-red-300'
-            : 'border-slate-600 bg-slate-800 text-slate-400'}"
-      >
-        <span class="mt-px select-none text-base leading-none">
-          {isOk ? '✓' : isErr ? '✗' : '—'}
-        </span>
-        <span>{connectionMessage}</span>
-      </div>
-
-      {#if saved}
-        <p class="text-xs text-slate-500">
-          {isOk
-            ? 'Settings saved.'
-            : 'Settings saved (Lidarr connection failed — check URL and API key).'}
-        </p>
-      {/if}
+    {#if saved}
+      <p class="text-xs text-slate-500">
+        All settings saved.
+      </p>
     {/if}
   </form>
 </section>

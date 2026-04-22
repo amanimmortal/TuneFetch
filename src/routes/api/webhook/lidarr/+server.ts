@@ -18,6 +18,9 @@ import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { getDb } from '$lib/server/db';
 import { mirrorTrackFile, remirrorUpgrade } from '$lib/server/mirror';
+import { refreshLibrarySection } from '$lib/server/plex';
+import { triggerSyncForArtist } from '$lib/server/plex-sync';
+import { getSetting, SETTING_KEYS } from '$lib/server/settings';
 
 // ── Lidarr webhook payload types ──────────────────────────────────────────────
 
@@ -111,6 +114,10 @@ export const POST: RequestHandler = async ({ request }) => {
     }
 
     await Promise.allSettled(tasks);
+
+    // Trigger Plex library refresh + delayed sync for affected playlists
+    _triggerPlexSync(lidarrArtistId);
+
     return json({ ok: true, event: 'Upgrade', tasks: tasks.length });
   }
 
@@ -186,6 +193,9 @@ export const POST: RequestHandler = async ({ request }) => {
 
   await Promise.allSettled(tasks);
 
+  // Trigger Plex library refresh + delayed sync for affected playlists
+  _triggerPlexSync(lidarrArtistId);
+
   return json({
     ok: true,
     event: 'Download',
@@ -193,3 +203,26 @@ export const POST: RequestHandler = async ({ request }) => {
     candidates: mirrorCandidates.length
   });
 };
+
+/**
+ * After a Lidarr download, kick off a Plex library scan and queue delayed
+ * playlist syncs. Runs in the background (fire-and-forget) so the webhook
+ * response isn't blocked.
+ */
+function _triggerPlexSync(lidarrArtistId: number): void {
+  const sectionId = getSetting(SETTING_KEYS.PLEX_LIBRARY_SECTION_ID);
+  if (!sectionId) return; // Plex not configured — nothing to do
+
+  // Fire-and-forget: refresh the library section, then queue syncs
+  refreshLibrarySection(sectionId)
+    .then(() => {
+      console.log('[webhook] Plex library refresh triggered for section', sectionId);
+    })
+    .catch((err) => {
+      console.warn('[webhook] Plex library refresh failed:', err);
+    });
+
+  // Queue delayed sync attempts for any playlists that reference this artist.
+  // The retry backoff handles the gap between Plex refresh and file indexing.
+  triggerSyncForArtist(lidarrArtistId);
+}

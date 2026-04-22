@@ -2,6 +2,7 @@ import { fail } from '@sveltejs/kit';
 import type { Actions, PageServerLoad } from './$types';
 import { SETTING_KEYS, getAllSettings, setSetting } from '$lib/server/settings';
 import { systemStatus, LidarrError } from '$lib/server/lidarr';
+import { testConnection as testPlexConnection, PlexError } from '$lib/server/plex';
 
 // ── Shared result shape ───────────────────────────────────────────────────────
 
@@ -34,6 +35,28 @@ async function testLidarrConnection(): Promise<ConnectionResult> {
 	}
 }
 
+async function testPlexConnectionWrapper(fetchFn?: typeof fetch): Promise<ConnectionResult> {
+	try {
+		const identity = await testPlexConnection(fetchFn);
+		return {
+			connectionStatus: 'ok',
+			connectionMessage: `Connected — ${identity.friendlyName ?? 'Plex'} v${identity.version}`
+		};
+	} catch (err: unknown) {
+		if (err instanceof PlexError && err.message.includes('not configured')) {
+			return {
+				connectionStatus: 'unconfigured',
+				connectionMessage: err.message
+			};
+		}
+		const message = err instanceof Error ? err.message : String(err);
+		return {
+			connectionStatus: 'error',
+			connectionMessage: message
+		};
+	}
+}
+
 // ── Load ──────────────────────────────────────────────────────────────────────
 
 export const load: PageServerLoad = async () => {
@@ -43,7 +66,10 @@ export const load: PageServerLoad = async () => {
 			lidarrUrl: settings[SETTING_KEYS.LIDARR_URL] ?? '',
 			lidarrApiKey: settings[SETTING_KEYS.LIDARR_API_KEY] ?? '',
 			adminContactEmail: settings[SETTING_KEYS.ADMIN_CONTACT_EMAIL] ?? '',
-			orphanScanTime: settings[SETTING_KEYS.ORPHAN_SCAN_TIME] ?? '03:00'
+			orphanScanTime: settings[SETTING_KEYS.ORPHAN_SCAN_TIME] ?? '03:00',
+			plexUrl: settings[SETTING_KEYS.PLEX_URL] ?? '',
+			plexAdminToken: settings[SETTING_KEYS.PLEX_ADMIN_TOKEN] ?? '',
+			plexLibrarySectionId: settings[SETTING_KEYS.PLEX_LIBRARY_SECTION_ID] ?? ''
 		}
 	};
 };
@@ -63,13 +89,18 @@ export const actions: Actions = {
 		const lidarrApiKey = ((data.get('lidarr_api_key') as string | null) ?? '').trim();
 		const adminContactEmail = ((data.get('admin_contact_email') as string | null) ?? '').trim();
 		const orphanScanTime = ((data.get('orphan_scan_time') as string | null) ?? '03:00').trim();
+		const plexUrl = ((data.get('plex_url') as string | null) ?? '').trim();
+		const plexAdminToken = ((data.get('plex_admin_token') as string | null) ?? '').trim();
+		const plexLibrarySectionId = ((data.get('plex_library_section_id') as string | null) ?? '').trim();
 
 		// Validate orphan scan time format
 		if (!/^\d{2}:\d{2}$/.test(orphanScanTime)) {
 			return fail(400, {
 				error: 'Orphan scan time must be in HH:MM format.',
 				connectionStatus: null as ConnectionStatus | null,
-				connectionMessage: null as string | null
+				connectionMessage: null as string | null,
+				plexConnectionStatus: null as ConnectionStatus | null,
+				plexConnectionMessage: null as string | null
 			});
 		}
 
@@ -77,8 +108,11 @@ export const actions: Actions = {
 		setSetting(SETTING_KEYS.LIDARR_API_KEY, lidarrApiKey);
 		setSetting(SETTING_KEYS.ADMIN_CONTACT_EMAIL, adminContactEmail);
 		setSetting(SETTING_KEYS.ORPHAN_SCAN_TIME, orphanScanTime);
+		setSetting(SETTING_KEYS.PLEX_URL, plexUrl);
+		setSetting(SETTING_KEYS.PLEX_ADMIN_TOKEN, plexAdminToken);
+		setSetting(SETTING_KEYS.PLEX_LIBRARY_SECTION_ID, plexLibrarySectionId);
 
-		// Test connection using the values just saved
+		// Test Lidarr connection
 		const connection =
 			lidarrUrl && lidarrApiKey
 				? await testLidarrConnection()
@@ -87,7 +121,21 @@ export const actions: Actions = {
 						connectionMessage: 'Lidarr URL and API key are required to test the connection.'
 					};
 
-		return { saved: true, ...connection };
+		// Test Plex connection
+		const plexConnection =
+			plexUrl && plexAdminToken
+				? await testPlexConnectionWrapper()
+				: {
+						connectionStatus: 'unconfigured' as const,
+						connectionMessage: 'Plex URL and admin token are required to test the connection.'
+					};
+
+		return {
+			saved: true,
+			...connection,
+			plexConnectionStatus: plexConnection.connectionStatus,
+			plexConnectionMessage: plexConnection.connectionMessage
+		};
 	},
 
 	/**
@@ -96,6 +144,20 @@ export const actions: Actions = {
 	 */
 	testConnection: async () => {
 		const connection = await testLidarrConnection();
-		return { saved: false, ...connection };
+		return { saved: false, ...connection, plexConnectionStatus: null, plexConnectionMessage: null };
+	},
+
+	/**
+	 * Test the currently saved Plex connection without modifying settings.
+	 */
+	testPlexConnection: async () => {
+		const connection = await testPlexConnectionWrapper();
+		return {
+			saved: false,
+			connectionStatus: null,
+			connectionMessage: null,
+			plexConnectionStatus: connection.connectionStatus,
+			plexConnectionMessage: connection.connectionMessage
+		};
 	}
 };

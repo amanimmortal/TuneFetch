@@ -95,3 +95,43 @@ CREATE TABLE IF NOT EXISTS orphan_files (
   root_folder TEXT NOT NULL,
   found_at    DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Maps Lidarr root folder paths to Plex managed users.
+-- A user in Plex maps to a root folder in Lidarr (e.g. "Ben" → /mnt/music/ben).
+-- This bridge lets TuneFetch know which Plex user should receive playlists
+-- for lists that target a specific root folder path.
+CREATE TABLE IF NOT EXISTS plex_user_mappings (
+  id                INTEGER PRIMARY KEY,
+  root_folder_path  TEXT NOT NULL UNIQUE,
+  plex_user_name    TEXT NOT NULL,
+  plex_user_token   TEXT NOT NULL,
+  created_at        DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Links a TuneFetch list to a Plex playlist for a specific user.
+-- A single list can have multiple plex_playlists rows (different users),
+-- and a single user can have multiple playlists from different lists.
+CREATE TABLE IF NOT EXISTS plex_playlists (
+  id               INTEGER PRIMARY KEY,
+  list_id          INTEGER NOT NULL REFERENCES lists(id) ON DELETE CASCADE,
+  plex_user_token  TEXT NOT NULL,
+  plex_user_name   TEXT NOT NULL,
+  plex_playlist_id TEXT,          -- null until first sync creates it in Plex
+  playlist_title   TEXT NOT NULL,
+  last_synced_at   DATETIME,
+  created_at       DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_plex_playlists_list ON plex_playlists(list_id);
+
+-- Tracks which list items have been successfully synced to which Plex playlists.
+-- Stores the Plex ratingKey so subsequent syncs skip already-added tracks,
+-- and the playlistItemID so items can be surgically removed.
+CREATE TABLE IF NOT EXISTS plex_playlist_items (
+  id                    INTEGER PRIMARY KEY,
+  plex_playlist_id_fk   INTEGER NOT NULL REFERENCES plex_playlists(id) ON DELETE CASCADE,
+  list_item_id          INTEGER NOT NULL REFERENCES list_items(id) ON DELETE CASCADE,
+  plex_rating_key       TEXT NOT NULL,
+  plex_playlist_item_id TEXT,     -- needed for targeted removal
+  synced_at             DATETIME DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(plex_playlist_id_fk, list_item_id)
+);

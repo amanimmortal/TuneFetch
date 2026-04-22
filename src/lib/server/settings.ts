@@ -8,7 +8,10 @@ export const SETTING_KEYS = {
   LIDARR_URL: 'lidarr_url',
   LIDARR_API_KEY: 'lidarr_api_key',
   ADMIN_CONTACT_EMAIL: 'admin_contact_email',
-  ORPHAN_SCAN_TIME: 'orphan_scan_time' // HH:MM, 24-hour. Default 03:00.
+  ORPHAN_SCAN_TIME: 'orphan_scan_time', // HH:MM, 24-hour. Default 03:00.
+  PLEX_URL: 'plex_url',
+  PLEX_ADMIN_TOKEN: 'plex_admin_token',
+  PLEX_LIBRARY_SECTION_ID: 'plex_library_section_id'
 } as const;
 
 export type SettingKey = (typeof SETTING_KEYS)[keyof typeof SETTING_KEYS];
@@ -55,4 +58,20 @@ export function getLidarrConfig(): { baseUrl: string; apiKey: string } {
     );
   }
   return { baseUrl: baseUrl.replace(/\/+$/, ''), apiKey };
+}
+
+/**
+ * Return the Plex base URL and admin token.
+ *
+ * Throws a plain Error if either value is missing.
+ */
+export function getPlexConfig(): { baseUrl: string; adminToken: string } {
+  const baseUrl = getSetting(SETTING_KEYS.PLEX_URL);
+  const adminToken = getSetting(SETTING_KEYS.PLEX_ADMIN_TOKEN);
+  if (!baseUrl || !adminToken) {
+    throw new Error(
+      'Plex URL and admin token must be configured in Settings before using this feature.'
+    );
+  }
+  return { baseUrl: baseUrl.replace(/\/+$/, ''), adminToken };
 }
