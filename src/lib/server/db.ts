@@ -43,6 +43,13 @@ export function getDb(): Database.Database {
     db.exec('ALTER TABLE lists ADD COLUMN metadata_profile_id INTEGER');
   }
 
+  // Migration: library_section_id moved from global settings to per-user mapping
+  const plexMappingCols = (db.pragma('table_info(plex_user_mappings)') as Array<{ name: string }>)
+    .map((c) => c.name);
+  if (!plexMappingCols.includes('library_section_id')) {
+    db.exec("ALTER TABLE plex_user_mappings ADD COLUMN library_section_id TEXT NOT NULL DEFAULT ''");
+  }
+
   _db = db;
   return db;
 }

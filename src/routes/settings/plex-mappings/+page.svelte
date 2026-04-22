@@ -8,8 +8,10 @@
   let selectedRootPath = '';
   let userName = '';
   let userToken = '';
+  let librarySectionId = '';
   let saving = false;
   let fetchingUsers = false;
+  let fetchingSections = false;
   let errorMessage = '';
   let successMessage = '';
   let deletingId: number | null = null;
@@ -17,6 +19,10 @@
   // Plex managed users fetched from plex.tv
   let plexUsers: Array<{ id: number; title: string; accessToken: string }> = [];
   let selectedPlexUserId = '';
+
+  // Plex library sections fetched from the server
+  let plexSections: Array<{ key: string; title: string; type: string }> = [];
+  let selectedSectionKey = '';
 
   async function fetchPlexUsers() {
     if (!data.plexConfigured) {
@@ -43,7 +49,31 @@
     }
   }
 
-  // When a Plex user is selected from the dropdown, populate the form
+  async function fetchSections() {
+    fetchingSections = true;
+    errorMessage = '';
+    try {
+      const res = await fetch('/api/plex?action=sections');
+      const result = await res.json();
+      if (result.ok) {
+        // Only show music libraries
+        plexSections = result.sections.filter(
+          (s: { type: string }) => s.type === 'artist'
+        );
+        if (plexSections.length === 0) {
+          errorMessage = 'No music libraries found. Make sure you have a Music type library in Plex.';
+        }
+      } else {
+        errorMessage = result.error ?? 'Failed to fetch library sections';
+      }
+    } catch {
+      errorMessage = 'Network error fetching Plex sections';
+    } finally {
+      fetchingSections = false;
+    }
+  }
+
+  // When a Plex user is selected, populate name + token
   $: if (selectedPlexUserId && plexUsers.length > 0) {
     const user = plexUsers.find(u => u.id === Number(selectedPlexUserId));
     if (user) {
@@ -52,9 +82,14 @@
     }
   }
 
+  // When a section is selected, populate librarySectionId
+  $: if (selectedSectionKey) {
+    librarySectionId = selectedSectionKey;
+  }
+
   async function saveMapping() {
-    if (!selectedRootPath || !userName || !userToken) {
-      errorMessage = 'All fields are required.';
+    if (!selectedRootPath || !userName || !userToken || !librarySectionId) {
+      errorMessage = 'All fields are required, including the music library section.';
       return;
     }
     saving = true;
@@ -68,16 +103,19 @@
           action: 'save_mapping',
           root_folder_path: selectedRootPath,
           plex_user_name: userName,
-          plex_user_token: userToken
+          plex_user_token: userToken,
+          library_section_id: librarySectionId
         })
       });
       const result = await res.json();
       if (result.ok) {
-        successMessage = `Mapped "${selectedRootPath}" → ${userName}`;
+        successMessage = `Mapped "${selectedRootPath}" → ${userName} (section ${librarySectionId})`;
         selectedRootPath = '';
         userName = '';
         userToken = '';
+        librarySectionId = '';
         selectedPlexUserId = '';
+        selectedSectionKey = '';
         await invalidateAll();
       } else {
         errorMessage = result.error ?? 'Failed to save mapping';
@@ -134,6 +172,11 @@
                 <code class="font-mono text-sm text-slate-300">{mapping.root_folder_path}</code>
                 <span class="text-slate-500">→</span>
                 <span class="font-medium text-purple-300">{mapping.plex_user_name}</span>
+                {#if mapping.library_section_id}
+                  <span class="badge bg-slate-700 text-slate-400 text-xs">section {mapping.library_section_id}</span>
+                {:else}
+                  <span class="badge bg-amber-900/40 text-amber-400 border border-amber-700 text-xs">⚠ No section set</span>
+                {/if}
               </div>
               <p class="mt-0.5 text-xs text-slate-500">
                 Token: {mapping.plex_user_token.substring(0, 8)}…
@@ -258,9 +301,55 @@
         </p>
       </div>
 
+      <!-- Section ID: fetch from server or enter manually -->
+      <div>
+        <label for="section_select" class="mb-1 block text-sm font-medium text-slate-300">
+          Music Library Section
+        </label>
+        <p class="mb-2 text-xs text-slate-400">
+          Each user/family group can have their own separate music library.
+          Fetch sections from Plex, or enter the numeric ID manually.
+        </p>
+        <div class="flex gap-2">
+          {#if plexSections.length === 0}
+            <input
+              id="section_select"
+              type="text"
+              class="input flex-1"
+              bind:value={librarySectionId}
+              placeholder="e.g. 3"
+            />
+            <button
+              class="btn-secondary shrink-0"
+              disabled={fetchingSections}
+              on:click={fetchSections}
+            >
+              {fetchingSections ? 'Fetching…' : 'Fetch Sections'}
+            </button>
+          {:else}
+            <select
+              id="section_select"
+              class="input flex-1"
+              bind:value={selectedSectionKey}
+            >
+              <option value="">Select a library…</option>
+              {#each plexSections as section}
+                <option value={section.key}>{section.title} (ID: {section.key})</option>
+              {/each}
+            </select>
+            <button
+              class="btn-secondary shrink-0 text-xs"
+              on:click={() => { plexSections = []; selectedSectionKey = ''; librarySectionId = ''; }}
+            >
+              Clear
+            </button>
+          {/if}
+        </div>
+      </div>
+
       <button
         class="btn-primary"
-        disabled={saving || !selectedRootPath || !userName || !userToken}
+        disabled={saving || !selectedRootPath || !userName || !userToken || !librarySectionId}
         on:click={saveMapping}
       >
         {saving ? 'Saving…' : 'Save Mapping'}

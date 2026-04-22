@@ -83,6 +83,19 @@ export async function syncListToPlexPlaylist(
 		throw new Error(`plex_playlists row ${plexPlaylistDbId} not found`);
 	}
 
+	// Look up the library_section_id from the user mapping (matched by token)
+	const userMapping = db
+		.prepare('SELECT library_section_id FROM plex_user_mappings WHERE plex_user_token = ?')
+		.get(row.plex_user_token) as { library_section_id: string } | undefined;
+
+	const librarySectionId = userMapping?.library_section_id ?? '';
+	if (!librarySectionId) {
+		console.warn(
+			`[plex-sync] No library_section_id configured for user "${row.plex_user_name}" — ` +
+			`update the Plex user mapping in Settings.`
+		);
+	}
+
 	// Load all synced list items for this list
 	const items = db
 		.prepare(
@@ -138,7 +151,7 @@ export async function syncListToPlexPlaylist(
 		}
 
 		try {
-			const track = await searchTrack(item.artist_name, item.title);
+			const track = await searchTrack(item.artist_name, item.title, librarySectionId);
 			if (track) {
 				foundItems.push({
 					listItemId: item.id,
@@ -330,4 +343,28 @@ export function triggerSyncForArtist(lidarrArtistId: number): void {
 	for (const { id } of playlists) {
 		enqueuePlexSync(id);
 	}
+}
+
+/**
+ * Return the distinct library_section_ids for all Plex users who have playlists
+ * that include tracks for the given Lidarr artist.
+ *
+ * Used by the webhook handler to refresh each relevant library section.
+ */
+export function getSectionIdsForArtist(lidarrArtistId: number): string[] {
+	const db = getDb();
+
+	const rows = db
+		.prepare(
+			`SELECT DISTINCT m.library_section_id
+       FROM plex_playlists pp
+       JOIN list_items li ON li.list_id = pp.list_id
+       JOIN plex_user_mappings m ON m.plex_user_token = pp.plex_user_token
+       WHERE li.lidarr_artist_id = ?
+         AND li.sync_status IN ('synced', 'mirror_pending', 'mirror_active')
+         AND m.library_section_id != ''`
+		)
+		.all(lidarrArtistId) as Array<{ library_section_id: string }>;
+
+	return rows.map((r) => r.library_section_id);
 }

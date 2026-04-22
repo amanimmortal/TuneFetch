@@ -68,8 +68,7 @@ export const load: PageServerLoad = async () => {
 			adminContactEmail: settings[SETTING_KEYS.ADMIN_CONTACT_EMAIL] ?? '',
 			orphanScanTime: settings[SETTING_KEYS.ORPHAN_SCAN_TIME] ?? '03:00',
 			plexUrl: settings[SETTING_KEYS.PLEX_URL] ?? '',
-			plexAdminToken: settings[SETTING_KEYS.PLEX_ADMIN_TOKEN] ?? '',
-			plexLibrarySectionId: settings[SETTING_KEYS.PLEX_LIBRARY_SECTION_ID] ?? ''
+			plexAdminToken: settings[SETTING_KEYS.PLEX_ADMIN_TOKEN] ?? ''
 		}
 	};
 };
@@ -91,7 +90,6 @@ export const actions: Actions = {
 		const orphanScanTime = ((data.get('orphan_scan_time') as string | null) ?? '03:00').trim();
 		const plexUrl = ((data.get('plex_url') as string | null) ?? '').trim();
 		const plexAdminToken = ((data.get('plex_admin_token') as string | null) ?? '').trim();
-		const plexLibrarySectionId = ((data.get('plex_library_section_id') as string | null) ?? '').trim();
 
 		// Validate orphan scan time format
 		if (!/^\d{2}:\d{2}$/.test(orphanScanTime)) {
@@ -110,7 +108,6 @@ export const actions: Actions = {
 		setSetting(SETTING_KEYS.ORPHAN_SCAN_TIME, orphanScanTime);
 		setSetting(SETTING_KEYS.PLEX_URL, plexUrl);
 		setSetting(SETTING_KEYS.PLEX_ADMIN_TOKEN, plexAdminToken);
-		setSetting(SETTING_KEYS.PLEX_LIBRARY_SECTION_ID, plexLibrarySectionId);
 
 		// Test Lidarr connection
 		const connection =

@@ -10,8 +10,7 @@ export const SETTING_KEYS = {
   ADMIN_CONTACT_EMAIL: 'admin_contact_email',
   ORPHAN_SCAN_TIME: 'orphan_scan_time', // HH:MM, 24-hour. Default 03:00.
   PLEX_URL: 'plex_url',
-  PLEX_ADMIN_TOKEN: 'plex_admin_token',
-  PLEX_LIBRARY_SECTION_ID: 'plex_library_section_id'
+  PLEX_ADMIN_TOKEN: 'plex_admin_token'
 } as const;
 
 export type SettingKey = (typeof SETTING_KEYS)[keyof typeof SETTING_KEYS];

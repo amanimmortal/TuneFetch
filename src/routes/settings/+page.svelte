@@ -163,23 +163,6 @@
       </p>
     </div>
 
-    <div>
-      <label for="plex_library_section_id" class="mb-1 block text-sm font-medium text-slate-300">
-        Music Library Section ID
-      </label>
-      <input
-        id="plex_library_section_id"
-        name="plex_library_section_id"
-        type="text"
-        placeholder="e.g. 3"
-        value={data.settings.plexLibrarySectionId}
-        class="input"
-        autocomplete="off"
-      />
-      <p class="mt-1 text-xs text-slate-500">
-        The numeric ID of your Plex music library section. Test the connection first, then check your library sections.
-      </p>
-    </div>
 
     <div>
       <button

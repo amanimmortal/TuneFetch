@@ -390,21 +390,20 @@ export async function getManagedUsers(
 /**
  * Search for a track in the Plex library by artist name and track title.
  *
- * Returns the first matching track's ratingKey, or null if not found.
- * Uses the configured library section for scoped search.
+ * @param sectionId - The Plex library section ID to search within (per-user).
+ * Returns the first matching track, or null if not found.
  */
 export async function searchTrack(
 	artistName: string,
 	trackTitle: string,
+	sectionId: string,
 	fetchFn?: FetchFn
 ): Promise<PlexTrack | null> {
-	const sectionId = getSetting(SETTING_KEYS.PLEX_LIBRARY_SECTION_ID);
 	if (!sectionId) {
-		throw new PlexError('Plex music library section is not configured.');
+		throw new PlexError('No Plex library section ID provided for this user mapping.');
 	}
 
-	// Search by track title within the music library section.
-	// Plex search uses the hub endpoint or the direct search endpoint.
+	// Search by track title within the music library section (type=10 = track)
 	const searchQuery = encodeURIComponent(trackTitle);
 	const raw = await request<{
 		MediaContainer: { Metadata?: PlexTrack[] };
@@ -416,7 +415,6 @@ export async function searchTrack(
 
 	const results = raw.MediaContainer.Metadata ?? [];
 
-	// Filter to tracks matching the artist name (case-insensitive)
 	const artistLower = artistName.toLowerCase();
 	const titleLower = trackTitle.toLowerCase();
 
@@ -424,11 +422,11 @@ export async function searchTrack(
 	const exact = results.find(
 		(t) =>
 			t.title.toLowerCase() === titleLower &&
-			(t.grandparentTitle?.toLowerCase() === artistLower)
+			t.grandparentTitle?.toLowerCase() === artistLower
 	);
 	if (exact) return exact;
 
-	// Fuzzy: artist contains match
+	// Fuzzy: artist name contains match
 	const fuzzy = results.find(
 		(t) =>
 			t.title.toLowerCase() === titleLower &&
@@ -437,10 +435,7 @@ export async function searchTrack(
 	if (fuzzy) return fuzzy;
 
 	// Last resort: title-only match
-	const titleOnly = results.find(
-		(t) => t.title.toLowerCase() === titleLower
-	);
-	return titleOnly ?? null;
+	return results.find((t) => t.title.toLowerCase() === titleLower) ?? null;
 }
 
 // ── Public API — Playlist CRUD ────────────────────────────────────────────────
@@ -459,10 +454,7 @@ export async function createPlaylist(
 	ratingKeys: string[],
 	fetchFn?: FetchFn
 ): Promise<string> {
-	const config = readConfig();
-	const sectionId = getSetting(SETTING_KEYS.PLEX_LIBRARY_SECTION_ID);
-
-	// Build the URI for the initial items
+	// Build the URI for the initial items (no section ID needed for playlist creation)
 	const uri = `server://${await getMachineId(fetchFn)}/com.plexapp.plugins.library/library/metadata/${ratingKeys.join(',')}`;
 
 	const raw = await request<{

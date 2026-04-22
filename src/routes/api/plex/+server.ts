@@ -94,17 +94,18 @@ export const POST: RequestHandler = async ({ request, fetch: svelteKitFetch }) =
 		switch (action) {
 			// ── Save user mapping ───────────────────────────────────────────────
 			case 'save_mapping': {
-				const { root_folder_path, plex_user_name, plex_user_token } = body;
+				const { root_folder_path, plex_user_name, plex_user_token, library_section_id } = body;
 				if (!root_folder_path || !plex_user_name || !plex_user_token) {
 					throw error(400, 'root_folder_path, plex_user_name, and plex_user_token are required');
 				}
 				db.prepare(
-					`INSERT INTO plex_user_mappings (root_folder_path, plex_user_name, plex_user_token)
-					 VALUES (?, ?, ?)
+					`INSERT INTO plex_user_mappings (root_folder_path, plex_user_name, plex_user_token, library_section_id)
+					 VALUES (?, ?, ?, ?)
 					 ON CONFLICT(root_folder_path) DO UPDATE SET
 					   plex_user_name = excluded.plex_user_name,
-					   plex_user_token = excluded.plex_user_token`
-				).run(root_folder_path, plex_user_name, plex_user_token);
+					   plex_user_token = excluded.plex_user_token,
+					   library_section_id = excluded.library_section_id`
+				).run(root_folder_path, plex_user_name, plex_user_token, library_section_id ?? '');
 				return json({ ok: true });
 			}
 

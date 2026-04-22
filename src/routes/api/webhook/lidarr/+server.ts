@@ -19,8 +19,7 @@ import type { RequestHandler } from './$types';
 import { getDb } from '$lib/server/db';
 import { mirrorTrackFile, remirrorUpgrade } from '$lib/server/mirror';
 import { refreshLibrarySection } from '$lib/server/plex';
-import { triggerSyncForArtist } from '$lib/server/plex-sync';
-import { getSetting, SETTING_KEYS } from '$lib/server/settings';
+import { triggerSyncForArtist, getSectionIdsForArtist } from '$lib/server/plex-sync';
 
 // ── Lidarr webhook payload types ──────────────────────────────────────────────
 
@@ -210,17 +209,21 @@ export const POST: RequestHandler = async ({ request }) => {
  * response isn't blocked.
  */
 function _triggerPlexSync(lidarrArtistId: number): void {
-  const sectionId = getSetting(SETTING_KEYS.PLEX_LIBRARY_SECTION_ID);
-  if (!sectionId) return; // Plex not configured — nothing to do
+  // Get the library section IDs for each Plex user affected by this artist.
+  // Each user may have their own separate music library in Plex.
+  const sectionIds = getSectionIdsForArtist(lidarrArtistId);
+  if (sectionIds.length === 0) return; // No Plex playlists configured for this artist
 
-  // Fire-and-forget: refresh the library section, then queue syncs
-  refreshLibrarySection(sectionId)
-    .then(() => {
-      console.log('[webhook] Plex library refresh triggered for section', sectionId);
-    })
-    .catch((err) => {
-      console.warn('[webhook] Plex library refresh failed:', err);
-    });
+  // Fire-and-forget: refresh each relevant library section
+  for (const sectionId of sectionIds) {
+    refreshLibrarySection(sectionId)
+      .then(() => {
+        console.log('[webhook] Plex library refresh triggered for section', sectionId);
+      })
+      .catch((err) => {
+        console.warn('[webhook] Plex library refresh failed for section', sectionId, err);
+      });
+  }
 
   // Queue delayed sync attempts for any playlists that reference this artist.
   // The retry backoff handles the gap between Plex refresh and file indexing.

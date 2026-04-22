@@ -101,11 +101,14 @@ CREATE TABLE IF NOT EXISTS orphan_files (
 -- This bridge lets TuneFetch know which Plex user should receive playlists
 -- for lists that target a specific root folder path.
 CREATE TABLE IF NOT EXISTS plex_user_mappings (
-  id                INTEGER PRIMARY KEY,
-  root_folder_path  TEXT NOT NULL UNIQUE,
-  plex_user_name    TEXT NOT NULL,
-  plex_user_token   TEXT NOT NULL,
-  created_at        DATETIME DEFAULT CURRENT_TIMESTAMP
+  id                    INTEGER PRIMARY KEY,
+  root_folder_path      TEXT NOT NULL UNIQUE,
+  plex_user_name        TEXT NOT NULL,
+  plex_user_token       TEXT NOT NULL,
+  -- The Plex music library section ID for this user.
+  -- Each user/family group may have a separate music library in Plex.
+  library_section_id    TEXT NOT NULL DEFAULT '',
+  created_at            DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Links a TuneFetch list to a Plex playlist for a specific user.
