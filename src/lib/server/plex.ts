@@ -266,16 +266,18 @@ export async function getManagedUsers(
 	const fn = fetchFn ?? fetch;
 
 	// ── Step 1: List home users from plex.tv ─────────────────────────────────
-	// NOTE: plex.tv /api/v2/home/users returns a direct JSON array, NOT { users: [] }.
+	// NOTE: Must use /api/home/users (NOT /api/v2/home/users).
+	// The v2 endpoint returns a different structure and the switch endpoint lives under v1.
+	// Response is XML — parse the User elements.
 	let usersResponse: Response;
 	try {
-		usersResponse = await fn('https://plex.tv/api/v2/home/users', {
+		usersResponse = await fn('https://plex.tv/api/home/users', {
 			method: 'GET',
 			headers: {
 				'X-Plex-Token': config.adminToken,
 				'X-Plex-Client-Identifier': PLEX_CLIENT_ID,
-				'X-Plex-Product': PLEX_PRODUCT,
-				Accept: 'application/json'
+				'X-Plex-Product': PLEX_PRODUCT
+				// No Accept: application/json — this endpoint returns XML
 			},
 			signal: AbortSignal.timeout(15_000)
 		});
@@ -291,59 +293,59 @@ export async function getManagedUsers(
 		);
 	}
 
-	const rawUsers = await usersResponse.json();
+	// Parse the XML response to extract User elements (attribute order-independent)
+	const xmlText = await usersResponse.text();
+	const userElementMatches = [...xmlText.matchAll(/<User\s([^>]*)\/?>|<User\s([^>]*)>[\s\S]*?<\/User>/g)];
 
-	// The API returns either a direct array or { users: [...] } depending on version.
-	const userList: Array<{ id: number; title: string; username?: string; [key: string]: unknown }> =
-		Array.isArray(rawUsers)
-			? rawUsers
-			: Array.isArray(rawUsers?.users)
-			? rawUsers.users
-			: [];
+	const userList: Array<{ id: number; title: string }> = [];
+	for (const m of userElementMatches) {
+		const attrs = m[1] ?? m[2] ?? '';
+		const idMatch = attrs.match(/\bid="(\d+)"/);
+		const titleMatch = attrs.match(/\btitle="([^"]*)"/);  
+		if (idMatch && titleMatch) {
+			userList.push({ id: parseInt(idMatch[1], 10), title: titleMatch[1] });
+		}
+	}
 
 	console.log(`[plex] Found ${userList.length} home user(s) from plex.tv`);
 
 	if (userList.length === 0) {
-		// Log the raw shape to help diagnose unexpected response formats
-		console.warn('[plex] Unexpected plex.tv /home/users response shape:', JSON.stringify(rawUsers).substring(0, 300));
+		console.warn('[plex] No users parsed from /api/home/users XML. Raw (first 500 chars):', xmlText.substring(0, 500));
 	}
 
-	// ── Step 2: Get per-server access token for each user via switch ──────────
+	// ── Step 2: Get per-user token via switch ─────────────────────────────────
+	// POST /api/home/users/{id}/switch → XML response with authenticationToken attribute
 	const users: PlexManagedUser[] = [];
 
 	for (const user of userList) {
 		try {
-			const switchUrl = `https://plex.tv/api/v2/home/users/${user.id}/switch`;
+			const switchUrl = `https://plex.tv/api/home/users/${user.id}/switch`;
 			const switchResponse = await fn(switchUrl, {
 				method: 'POST',
 				headers: {
 					'X-Plex-Token': config.adminToken,
 					'X-Plex-Client-Identifier': PLEX_CLIENT_ID,
-					'X-Plex-Product': PLEX_PRODUCT,
-					Accept: 'application/json'
+					'X-Plex-Product': PLEX_PRODUCT
+					// No Accept: application/json — returns XML
 				},
 				signal: AbortSignal.timeout(15_000)
 			});
 
 			if (switchResponse.ok) {
-				const switchData = (await switchResponse.json()) as Record<string, unknown>;
-				// The token field varies by Plex version: authToken, token, or auth_token
-				const token =
-					(switchData.authToken as string | undefined) ??
-					(switchData.token as string | undefined) ??
-					(switchData.auth_token as string | undefined);
+				const switchXml = await switchResponse.text();
+				// Extract authenticationToken from XML attribute
+				const tokenMatch = switchXml.match(/authenticationToken="([^"]+)"/);
+				const token = tokenMatch?.[1];
 
 				if (token) {
 					users.push({
 						id: user.id,
 						title: user.title,
-						username: user.username,
 						accessToken: token
 					});
 				} else {
 					console.warn(
-						`[plex] Switch succeeded for "${user.title}" but no token in response:`,
-						Object.keys(switchData)
+						`[plex] Switch succeeded for "${user.title}" but authenticationToken not found in XML`
 					);
 				}
 			} else {
