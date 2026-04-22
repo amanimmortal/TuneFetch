@@ -19,7 +19,9 @@ import {
 	updateAlbum,
 	getTracks,
 	updateTrack,
-	runCommand
+	runCommand,
+	getQualityProfiles,
+	getMetadataProfiles
 } from './lidarr';
 import { startBackfill } from './mirror';
 
@@ -45,6 +47,8 @@ interface ListRow {
 	id: number;
 	name: string;
 	root_folder_path: string;
+	quality_profile_id: number | null;
+	metadata_profile_id: number | null;
 }
 
 interface OwnershipRow {
@@ -129,6 +133,34 @@ function upsertOwnership(
 		.run(artistMbid, lidarrArtistId, ownerListId, rootFolderPath);
 }
 
+// ── Profile resolution ────────────────────────────────────────────────────────
+
+/**
+ * Resolve quality and metadata profile IDs for a list.
+ * Uses the list's stored values if configured; falls back to the first
+ * available Lidarr profile for pre-existing lists that predate this setting.
+ */
+async function resolveProfileIds(
+	list: ListRow
+): Promise<{ qualityProfileId: number; metadataProfileId: number }> {
+	if (list.quality_profile_id && list.metadata_profile_id) {
+		return {
+			qualityProfileId: list.quality_profile_id,
+			metadataProfileId: list.metadata_profile_id
+		};
+	}
+	// Fallback: fetch first available profiles from Lidarr
+	const [qualityProfiles, metadataProfiles] = await Promise.all([
+		getQualityProfiles(),
+		getMetadataProfiles()
+	]);
+	const qualityProfileId = list.quality_profile_id ?? qualityProfiles[0]?.id;
+	const metadataProfileId = list.metadata_profile_id ?? metadataProfiles[0]?.id;
+	if (!qualityProfileId) throw new Error('No quality profiles configured in Lidarr');
+	if (!metadataProfileId) throw new Error('No metadata profiles configured in Lidarr');
+	return { qualityProfileId, metadataProfileId };
+}
+
 // ── Main entry point ──────────────────────────────────────────────────────────
 
 /**
@@ -156,7 +188,7 @@ export async function orchestrate(listItemId: number): Promise<void> {
 	}
 
 	const list = db
-		.prepare('SELECT id, name, root_folder_path FROM lists WHERE id = ?')
+		.prepare('SELECT id, name, root_folder_path, quality_profile_id, metadata_profile_id FROM lists WHERE id = ?')
 		.get(item.list_id) as ListRow | undefined;
 
 	if (!list) {
@@ -198,10 +230,13 @@ async function scenarioA(item: ListItemRow, list: ListRow): Promise<void> {
 
 	if (!existing) {
 		// Artist is new to Lidarr — add with monitor=all
+		const { qualityProfileId, metadataProfileId } = await resolveProfileIds(list);
 		const lidarrArtist = await addArtist({
 			foreignArtistId: item.mbid,
 			artistName: item.artist_name,
 			rootFolderPath: list.root_folder_path,
+			qualityProfileId,
+			metadataProfileId,
 			monitored: true,
 			addOptions: { monitor: 'all', searchForMissingAlbums: true }
 		});
@@ -304,10 +339,13 @@ async function scenarioB(item: ListItemRow, list: ListRow): Promise<void> {
 			upsertOwnership(item.artist_mbid, existing.id, list.id, existing.rootFolderPath);
 		} else {
 			// Add artist to Lidarr with all albums unmonitored — we'll monitor only this track below
+			const { qualityProfileId, metadataProfileId } = await resolveProfileIds(list);
 			const lidarrArtist = await addArtist({
 				foreignArtistId: item.artist_mbid,
 				artistName: item.artist_name,
 				rootFolderPath: list.root_folder_path,
+				qualityProfileId,
+				metadataProfileId,
 				monitored: true,
 				addOptions: { monitor: 'none', searchForMissingAlbums: false }
 			});
@@ -414,10 +452,13 @@ async function scenarioC(item: ListItemRow, list: ListRow): Promise<void> {
 			lidarrArtistId = existing.id;
 			upsertOwnership(item.artist_mbid, existing.id, list.id, existing.rootFolderPath);
 		} else {
+			const { qualityProfileId, metadataProfileId } = await resolveProfileIds(list);
 			const lidarrArtist = await addArtist({
 				foreignArtistId: item.artist_mbid,
 				artistName: item.artist_name,
 				rootFolderPath: list.root_folder_path,
+				qualityProfileId,
+				metadataProfileId,
 				monitored: true,
 				addOptions: { monitor: 'none', searchForMissingAlbums: false }
 			});

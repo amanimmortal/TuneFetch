@@ -24,10 +24,12 @@ CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 
 -- Lists map to people and to Lidarr root folders.
 CREATE TABLE IF NOT EXISTS lists (
-  id               INTEGER PRIMARY KEY,
-  name             TEXT NOT NULL,
-  root_folder_path TEXT NOT NULL,
-  created_at       DATETIME DEFAULT CURRENT_TIMESTAMP
+  id                  INTEGER PRIMARY KEY,
+  name                TEXT NOT NULL,
+  root_folder_path    TEXT NOT NULL,
+  quality_profile_id  INTEGER,
+  metadata_profile_id INTEGER,
+  created_at          DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Items added to lists by users.

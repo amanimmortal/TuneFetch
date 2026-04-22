@@ -34,6 +34,15 @@ export function getDb(): Database.Database {
     db.exec('ALTER TABLE list_items ADD COLUMN artist_mbid TEXT');
   }
 
+  const listCols = (db.pragma('table_info(lists)') as Array<{ name: string }>)
+    .map((c) => c.name);
+  if (!listCols.includes('quality_profile_id')) {
+    db.exec('ALTER TABLE lists ADD COLUMN quality_profile_id INTEGER');
+  }
+  if (!listCols.includes('metadata_profile_id')) {
+    db.exec('ALTER TABLE lists ADD COLUMN metadata_profile_id INTEGER');
+  }
+
   _db = db;
   return db;
 }

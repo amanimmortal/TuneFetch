@@ -1,7 +1,14 @@
 ﻿import { fail } from "@sveltejs/kit";
 import type { Actions, PageServerLoad } from "./$types";
 import { getDb } from "$lib/server/db";
-import { rootFolders, LidarrError, listArtists, updateArtist } from "$lib/server/lidarr";
+import {
+	rootFolders,
+	LidarrError,
+	listArtists,
+	updateArtist,
+	getQualityProfiles,
+	getMetadataProfiles
+} from "$lib/server/lidarr";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -9,6 +16,8 @@ interface ListRow {
 	id: number;
 	name: string;
 	root_folder_path: string;
+	quality_profile_id: number | null;
+	metadata_profile_id: number | null;
 	item_count: number;
 }
 
@@ -32,7 +41,8 @@ export const load: PageServerLoad = async () => {
 
 	const lists = db
 		.prepare(
-			`SELECT l.id, l.name, l.root_folder_path, COUNT(li.id) as item_count
+			`SELECT l.id, l.name, l.root_folder_path, l.quality_profile_id, l.metadata_profile_id,
+              COUNT(li.id) as item_count
        FROM lists l
        LEFT JOIN list_items li ON li.list_id = l.id
        GROUP BY l.id
@@ -41,14 +51,20 @@ export const load: PageServerLoad = async () => {
 		.all() as ListRow[];
 
 	let folders: Array<{ id: number; path: string; freeSpace: number }> = [];
+	let qualityProfiles: Array<{ id: number; name: string }> = [];
+	let metadataProfiles: Array<{ id: number; name: string }> = [];
 	let lidarrError: string | null = null;
 	try {
-		folders = await rootFolders();
+		[folders, qualityProfiles, metadataProfiles] = await Promise.all([
+			rootFolders(),
+			getQualityProfiles(),
+			getMetadataProfiles()
+		]);
 	} catch (err) {
 		lidarrError = err instanceof LidarrError ? err.message : String(err);
 	}
 
-	return { lists, folders, lidarrError };
+	return { lists, folders, qualityProfiles, metadataProfiles, lidarrError };
 };
 
 // ── Actions ───────────────────────────────────────────────────────────────────
@@ -59,18 +75,42 @@ export const actions: Actions = {
 		const data = await request.formData();
 		const name = ((data.get("name") as string) ?? "").trim();
 		const rootFolderPath = ((data.get("root_folder_path") as string) ?? "").trim();
+		const qualityProfileId = Number(data.get("quality_profile_id")) || null;
+		const metadataProfileId = Number(data.get("metadata_profile_id")) || null;
 
 		if (!name) return fail(400, { createError: "Name is required." });
 		if (!rootFolderPath) return fail(400, { createError: "Root folder is required." });
+		if (!qualityProfileId) return fail(400, { createError: "Quality profile is required." });
+		if (!metadataProfileId) return fail(400, { createError: "Metadata profile is required." });
 
 		try {
 			getDb()
-				.prepare("INSERT INTO lists (name, root_folder_path) VALUES (?, ?)")
-				.run(name, rootFolderPath);
+				.prepare(
+					"INSERT INTO lists (name, root_folder_path, quality_profile_id, metadata_profile_id) VALUES (?, ?, ?, ?)"
+				)
+				.run(name, rootFolderPath, qualityProfileId, metadataProfileId);
 		} catch {
 			return fail(500, { createError: "Failed to create list." });
 		}
 		return { created: true };
+	},
+
+	/** Update quality/metadata profile settings for an existing list. */
+	updateSettings: async ({ request }) => {
+		const data = await request.formData();
+		const id = Number(data.get("id"));
+		const qualityProfileId = Number(data.get("quality_profile_id")) || null;
+		const metadataProfileId = Number(data.get("metadata_profile_id")) || null;
+
+		if (!qualityProfileId) return fail(400, { settingsError: "Quality profile is required.", settingsId: id });
+		if (!metadataProfileId) return fail(400, { settingsError: "Metadata profile is required.", settingsId: id });
+
+		getDb()
+			.prepare(
+				"UPDATE lists SET quality_profile_id = ?, metadata_profile_id = ? WHERE id = ?"
+			)
+			.run(qualityProfileId, metadataProfileId, id);
+		return { settingsSaved: true };
 	},
 
 	/** Rename an existing list. */

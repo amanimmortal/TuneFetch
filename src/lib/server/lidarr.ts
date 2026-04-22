@@ -134,6 +134,18 @@ export interface AddArtistPayload {
 	};
 }
 
+export interface QualityProfile {
+	id: number;
+	name: string;
+	[key: string]: unknown;
+}
+
+export interface MetadataProfile {
+	id: number;
+	name: string;
+	[key: string]: unknown;
+}
+
 export interface LidarrCommand {
 	id: number;
 	name: string;
@@ -229,6 +241,16 @@ export function systemStatus(fetchFn?: FetchFn): Promise<SystemStatus> {
 /** Return all configured root folders. Used to populate the list-create dropdown. */
 export function rootFolders(fetchFn?: FetchFn): Promise<RootFolder[]> {
 	return request<RootFolder[]>('GET', '/api/v1/rootfolder', undefined, fetchFn);
+}
+
+/** Return all configured quality profiles. */
+export function getQualityProfiles(fetchFn?: FetchFn): Promise<QualityProfile[]> {
+	return request<QualityProfile[]>('GET', '/api/v1/qualityprofile', undefined, fetchFn);
+}
+
+/** Return all configured metadata profiles. */
+export function getMetadataProfiles(fetchFn?: FetchFn): Promise<MetadataProfile[]> {
+	return request<MetadataProfile[]>('GET', '/api/v1/metadataprofile', undefined, fetchFn);
 }
 
 /** Return every artist currently in Lidarr. */

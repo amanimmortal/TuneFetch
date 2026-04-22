@@ -7,21 +7,25 @@
 
   // ── Local UI state ─────────────────────────────────────────────────────────
   let renamingId: number | null = null;
+  let editingSettingsId: number | null = null;
   let showCreateForm = false;
 
   // ── Derive action results from opaque ActionData union ─────────────────────
   $: f = form as Record<string, unknown> | null;
-  $: createError     = (f?.createError as string | undefined) ?? null;
-  $: renameError     = (f?.renameError as string | undefined) ?? null;
-  $: renameErrorId   = (f?.renameId   as number | undefined) ?? null;
+  $: createError     = (f?.createError   as string | undefined) ?? null;
+  $: renameError     = (f?.renameError   as string | undefined) ?? null;
+  $: renameErrorId   = (f?.renameId      as number | undefined) ?? null;
+  $: settingsError   = (f?.settingsError as string | undefined) ?? null;
+  $: settingsErrorId = (f?.settingsId    as number | undefined) ?? null;
   $: deleteWarning   = (f?.deleteWarning as boolean | undefined) ?? false;
-  $: deleteId        = (f?.deleteId   as number | undefined) ?? null;
-  $: transferable    = (f?.transferable as any[] | undefined) ?? [];
-  $: blocked         = (f?.blocked    as any[] | undefined) ?? [];
+  $: deleteId        = (f?.deleteId      as number | undefined) ?? null;
+  $: transferable    = (f?.transferable  as any[] | undefined) ?? [];
+  $: blocked         = (f?.blocked       as any[] | undefined) ?? [];
 
-  // Reset rename form after success
-  $: if (f?.renamed)  renamingId = null;
-  $: if (f?.created)  showCreateForm = false;
+  // Reset forms after success
+  $: if (f?.renamed)       renamingId = null;
+  $: if (f?.created)       showCreateForm = false;
+  $: if (f?.settingsSaved) editingSettingsId = null;
 </script>
 
 <svelte:head>
@@ -58,7 +62,7 @@
 
       {#if data.lidarrError}
         <p class="text-sm text-amber-400">
-          Cannot load root folders — Lidarr not configured or unreachable: {data.lidarrError}
+          Cannot load Lidarr data — Lidarr not configured or unreachable: {data.lidarrError}
         </p>
         <input name="root_folder_path" type="text" class="input" placeholder="/mnt/user/media/music/..." required />
       {:else}
@@ -70,6 +74,30 @@
             <option value="" disabled selected>Select a root folder…</option>
             {#each data.folders as folder}
               <option value={folder.path}>{folder.path}</option>
+            {/each}
+          </select>
+        </div>
+
+        <div>
+          <label for="new_quality_profile" class="mb-1 block text-sm font-medium text-slate-300">
+            Quality profile
+          </label>
+          <select id="new_quality_profile" name="quality_profile_id" class="input" required>
+            <option value="" disabled selected>Select a quality profile…</option>
+            {#each data.qualityProfiles as qp}
+              <option value={qp.id}>{qp.name}</option>
+            {/each}
+          </select>
+        </div>
+
+        <div>
+          <label for="new_metadata_profile" class="mb-1 block text-sm font-medium text-slate-300">
+            Metadata profile
+          </label>
+          <select id="new_metadata_profile" name="metadata_profile_id" class="input" required>
+            <option value="" disabled selected>Select a metadata profile…</option>
+            {#each data.metadataProfiles as mp}
+              <option value={mp.id}>{mp.name}</option>
             {/each}
           </select>
         </div>
@@ -110,6 +138,12 @@
               >
                 {renamingId === list.id ? "Cancel" : "Rename"}
               </button>
+              <button
+                class="btn-secondary text-sm"
+                on:click={() => (editingSettingsId = editingSettingsId === list.id ? null : list.id)}
+              >
+                {editingSettingsId === list.id ? "Cancel" : "Settings"}
+              </button>
               <form method="POST" action="?/delete" use:enhance>
                 <input type="hidden" name="id" value={list.id} />
                 <button type="submit" class="btn-danger text-sm">Delete</button>
@@ -139,6 +173,46 @@
             {#if renameError && renameErrorId === list.id}
               <p class="text-sm text-red-400">{renameError}</p>
             {/if}
+          {/if}
+
+          <!-- Inline settings form -->
+          {#if editingSettingsId === list.id}
+            <form
+              class="space-y-3 border-t border-slate-700 pt-3"
+              method="POST"
+              action="?/updateSettings"
+              use:enhance
+            >
+              <input type="hidden" name="id" value={list.id} />
+              {#if data.lidarrError}
+                <p class="text-sm text-amber-400">
+                  Cannot load Lidarr profiles: {data.lidarrError}
+                </p>
+              {:else}
+                <div>
+                  <label class="mb-1 block text-sm font-medium text-slate-300">Quality profile</label>
+                  <select name="quality_profile_id" class="input" required>
+                    <option value="" disabled selected={!list.quality_profile_id}>Select…</option>
+                    {#each data.qualityProfiles as qp}
+                      <option value={qp.id} selected={list.quality_profile_id === qp.id}>{qp.name}</option>
+                    {/each}
+                  </select>
+                </div>
+                <div>
+                  <label class="mb-1 block text-sm font-medium text-slate-300">Metadata profile</label>
+                  <select name="metadata_profile_id" class="input" required>
+                    <option value="" disabled selected={!list.metadata_profile_id}>Select…</option>
+                    {#each data.metadataProfiles as mp}
+                      <option value={mp.id} selected={list.metadata_profile_id === mp.id}>{mp.name}</option>
+                    {/each}
+                  </select>
+                </div>
+                {#if settingsError && settingsErrorId === list.id}
+                  <p class="text-sm text-red-400">{settingsError}</p>
+                {/if}
+                <button type="submit" class="btn-primary text-sm">Save settings</button>
+              {/if}
+            </form>
           {/if}
 
           <!-- Delete warning panel -->

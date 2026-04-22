@@ -6,6 +6,8 @@ interface ListRow {
 	id: number;
 	name: string;
 	root_folder_path: string;
+	quality_profile_id: number | null;
+	metadata_profile_id: number | null;
 }
 
 interface ListItemRow {
@@ -30,7 +32,7 @@ export const load: PageServerLoad = async ({ params }) => {
 	const db = getDb();
 
 	const list = db
-		.prepare('SELECT id, name, root_folder_path FROM lists WHERE id = ?')
+		.prepare('SELECT id, name, root_folder_path, quality_profile_id, metadata_profile_id FROM lists WHERE id = ?')
 		.get(id) as ListRow | undefined;
 
 	if (!list) error(404, 'List not found');
