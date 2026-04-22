@@ -25,7 +25,7 @@
   };
 
   // Track which items are currently being retried
-  const retrying = new Set<number>();
+  let retrying = new Set<number>();
 
   async function retryItem(itemId: number) {
     retrying.add(itemId);
