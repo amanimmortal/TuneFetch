@@ -295,6 +295,11 @@ export function updateArtist(
 	return request<LidarrArtist>('PUT', `/api/v1/artist/${artist.id}`, artist, fetchFn);
 }
 
+/** Fetch a single album by Lidarr internal ID. */
+export function getAlbum(id: number, fetchFn?: FetchFn): Promise<LidarrAlbum> {
+	return request<LidarrAlbum>('GET', `/api/v1/album/${id}`, undefined, fetchFn);
+}
+
 /** Return all albums for an artist, or all albums if no artistId is provided. */
 export function getAlbums(artistId?: number, fetchFn?: FetchFn): Promise<LidarrAlbum[]> {
 	const path = artistId !== undefined ? `/api/v1/album?artistId=${artistId}` : '/api/v1/album';
@@ -324,18 +329,9 @@ export function getTracks(artistId: number, fetchFn?: FetchFn): Promise<LidarrTr
 	);
 }
 
-/**
- * Update a track record (e.g. set monitored = true for Scenario B).
- * Pass the full track object back.
- *
- * NOTE: Lidarr does not expose a single-resource PUT for tracks.
- * The correct endpoint is PUT /api/v1/track (no ID) with an array body.
- * Returns the first (and only) updated track from the response array.
- */
-export async function updateTrack(track: LidarrTrack, fetchFn?: FetchFn): Promise<LidarrTrack> {
-	const results = await request<LidarrTrack[]>('PUT', '/api/v1/track', [track], fetchFn);
-	return results[0];
-}
+// Note: Lidarr's API has no PUT endpoint for tracks — /api/v1/track and
+// /api/v1/track/{id} are GET-only. Individual track monitoring cannot be
+// set via the API. Monitor the parent album instead.
 
 /**
  * Return all downloaded track files for an artist.

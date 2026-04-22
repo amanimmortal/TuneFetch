@@ -17,10 +17,10 @@ import {
 	getArtistByMbid,
 	addArtist,
 	updateArtist,
+	getAlbum,
 	getAlbums,
 	updateAlbum,
 	getTracks,
-	updateTrack,
 	runCommand,
 	getQualityProfiles,
 	getMetadataProfiles
@@ -406,13 +406,18 @@ async function scenarioB(item: ListItemRow, list: ListRow): Promise<void> {
 		return;
 	}
 
-	// Monitor only this track
-	await updateTrack({ ...target, monitored: true });
+	// Lidarr's API has no PUT endpoint for tracks — individual track monitoring cannot
+	// be set via the API. Monitor the parent album instead, which is the smallest
+	// downloadable unit Lidarr exposes.
+	const album = await getAlbum(target.albumId);
+	if (!album.monitored) {
+		await updateAlbum({ ...album, monitored: true });
+	}
 
-	// Trigger track search
-	await runCommand('TrackSearch', { trackIds: [target.id] });
+	// Trigger album search so Lidarr downloads the release containing this track.
+	await runCommand('AlbumSearch', { albumIds: [target.albumId] });
 
-	markSynced(item.id, { lidarrArtistId, lidarrTrackId: target.id });
+	markSynced(item.id, { lidarrArtistId, lidarrAlbumId: target.albumId, lidarrTrackId: target.id });
 }
 
 // ── Scenario C: full album add ────────────────────────────────────────────────
