@@ -8,12 +8,10 @@ import {
 	testConnection,
 	getLibrarySections,
 	getManagedUsers,
-	refreshLibrarySection,
 	PlexError
 } from '$lib/server/plex';
 import { syncListToPlexPlaylist } from '$lib/server/plex-sync';
 import { getDb } from '$lib/server/db';
-import { getSetting, SETTING_KEYS } from '$lib/server/settings';
 
 // ── GET /api/plex?action=... ──────────────────────────────────────────────────
 
@@ -144,16 +142,6 @@ export const POST: RequestHandler = async ({ request, fetch: svelteKitFetch }) =
 			case 'sync': {
 				const { playlist_id } = body;
 				if (!playlist_id) throw error(400, 'playlist_id is required');
-
-				// Optionally refresh the library section first
-				const sectionId = getSetting(SETTING_KEYS.PLEX_LIBRARY_SECTION_ID);
-				if (sectionId) {
-					try {
-						await refreshLibrarySection(sectionId, svelteKitFetch);
-					} catch (err) {
-						console.warn('[plex-api] Library refresh failed:', err);
-					}
-				}
 
 				const syncResult = await syncListToPlexPlaylist(Number(playlist_id));
 				return json({ ok: true, result: syncResult });
