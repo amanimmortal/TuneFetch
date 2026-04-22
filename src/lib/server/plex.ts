@@ -265,57 +265,16 @@ export async function getManagedUsers(
 	const config = readConfig();
 	const fn = fetchFn ?? fetch;
 
-	// First get the server's machine identifier
-	const identity = await testConnection(fn);
-	const machineId = identity.machineIdentifier;
-
-	// Get resources from plex.tv to find our server and its shared users
-	const resourcesUrl =
-		`https://plex.tv/api/v2/resources?includeHttps=1&includeRelay=1`;
-
-	let response: Response;
-	try {
-		response = await fn(resourcesUrl, {
-			method: 'GET',
-			headers: {
-				'X-Plex-Token': config.adminToken,
-				'X-Plex-Client-Identifier': PLEX_CLIENT_ID,
-				Accept: 'application/json'
-			},
-			signal: AbortSignal.timeout(15_000)
-		});
-	} catch (err: unknown) {
-		throw new PlexError(`Network error contacting plex.tv: ${describeFetchError(err)}`);
-	}
-
-	if (!response.ok) {
-		throw new PlexError(
-			`plex.tv returned HTTP ${response.status}`,
-			response.status,
-			await response.text()
-		);
-	}
-
-	const resources = (await response.json()) as Array<{
-		name: string;
-		clientIdentifier: string;
-		provides: string;
-		accessToken?: string;
-		[key: string]: unknown;
-	}>;
-
-	// The admin user's token is the one we already have.
-	// To get managed user tokens, we need to hit the shared_servers endpoint.
-	const sharedUrl =
-		`https://plex.tv/api/v2/home/users`;
-
+	// ── Step 1: List home users from plex.tv ─────────────────────────────────
+	// NOTE: plex.tv /api/v2/home/users returns a direct JSON array, NOT { users: [] }.
 	let usersResponse: Response;
 	try {
-		usersResponse = await fn(sharedUrl, {
+		usersResponse = await fn('https://plex.tv/api/v2/home/users', {
 			method: 'GET',
 			headers: {
 				'X-Plex-Token': config.adminToken,
 				'X-Plex-Client-Identifier': PLEX_CLIENT_ID,
+				'X-Plex-Product': PLEX_PRODUCT,
 				Accept: 'application/json'
 			},
 			signal: AbortSignal.timeout(15_000)
@@ -332,22 +291,27 @@ export async function getManagedUsers(
 		);
 	}
 
-	const usersData = (await usersResponse.json()) as {
-		users?: Array<{
-			id: number;
-			title: string;
-			username?: string;
-			[key: string]: unknown;
-		}>;
-		[key: string]: unknown;
-	};
+	const rawUsers = await usersResponse.json();
 
+	// The API returns either a direct array or { users: [...] } depending on version.
+	const userList: Array<{ id: number; title: string; username?: string; [key: string]: unknown }> =
+		Array.isArray(rawUsers)
+			? rawUsers
+			: Array.isArray(rawUsers?.users)
+			? rawUsers.users
+			: [];
+
+	console.log(`[plex] Found ${userList.length} home user(s) from plex.tv`);
+
+	if (userList.length === 0) {
+		// Log the raw shape to help diagnose unexpected response formats
+		console.warn('[plex] Unexpected plex.tv /home/users response shape:', JSON.stringify(rawUsers).substring(0, 300));
+	}
+
+	// ── Step 2: Get per-server access token for each user via switch ──────────
 	const users: PlexManagedUser[] = [];
 
-	// For each user, we need their per-server access token.
-	// The admin user can switch to a managed user via plex.tv API.
-	for (const user of usersData.users ?? []) {
-		// Try to get a per-server token for this user by "switching" to them
+	for (const user of userList) {
 		try {
 			const switchUrl = `https://plex.tv/api/v2/home/users/${user.id}/switch`;
 			const switchResponse = await fn(switchUrl, {
@@ -355,32 +319,43 @@ export async function getManagedUsers(
 				headers: {
 					'X-Plex-Token': config.adminToken,
 					'X-Plex-Client-Identifier': PLEX_CLIENT_ID,
+					'X-Plex-Product': PLEX_PRODUCT,
 					Accept: 'application/json'
 				},
 				signal: AbortSignal.timeout(15_000)
 			});
 
 			if (switchResponse.ok) {
-				const switchData = (await switchResponse.json()) as {
-					authToken?: string;
-					[key: string]: unknown;
-				};
-				if (switchData.authToken) {
+				const switchData = (await switchResponse.json()) as Record<string, unknown>;
+				// The token field varies by Plex version: authToken, token, or auth_token
+				const token =
+					(switchData.authToken as string | undefined) ??
+					(switchData.token as string | undefined) ??
+					(switchData.auth_token as string | undefined);
+
+				if (token) {
 					users.push({
 						id: user.id,
 						title: user.title,
 						username: user.username,
-						accessToken: switchData.authToken
+						accessToken: token
 					});
+				} else {
+					console.warn(
+						`[plex] Switch succeeded for "${user.title}" but no token in response:`,
+						Object.keys(switchData)
+					);
 				}
+			} else {
+				const errText = await switchResponse.text();
+				console.warn(
+					`[plex] Switch failed for "${user.title}" — HTTP ${switchResponse.status}: ${errText.substring(0, 200)}`
+				);
 			}
 		} catch (err) {
-			console.warn(`[plex] Failed to get token for user "${user.title}":`, err);
+			console.warn(`[plex] Exception switching to user "${user.title}":`, err);
 		}
 	}
-
-	// Re-switch back to admin to restore the admin context
-	// (The admin token itself is still valid, this is just best practice)
 
 	return users;
 }
