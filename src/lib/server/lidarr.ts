@@ -97,7 +97,7 @@ export interface LidarrAlbum {
 
 export interface LidarrTrack {
 	id: number;
-	/** MusicBrainz recording MBID. */
+	/** MusicBrainz track MBID (track-on-a-release, not the recording MBID). */
 	foreignTrackId: string;
 	artistId: number;
 	albumId: number;

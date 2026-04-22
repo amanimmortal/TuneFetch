@@ -379,21 +379,29 @@ async function scenarioB(item: ListItemRow, list: ListRow): Promise<void> {
 		}
 	}
 
-	// Find the track in Lidarr by its recording MBID
+	// Find the track in Lidarr.
+	// TuneFetch stores the MusicBrainz recording MBID; Lidarr's foreignTrackId is the
+	// MusicBrainz track MBID (a track-on-a-release entity). They are different IDs for
+	// the same song, so MBID lookup will often miss. Fall back to title matching.
 	const tracks = await getTracks(lidarrArtistId);
-	const target = tracks.find((t) => t.foreignTrackId === item.mbid);
+	let target = tracks.find((t) => t.foreignTrackId === item.mbid);
+
+	if (!target) {
+		const titleLower = item.title.toLowerCase();
+		target = tracks.find((t) => t.title.toLowerCase() === titleLower);
+	}
 
 	if (!target) {
 		const sample = tracks
 			.slice(0, 5)
-			.map((t) => t.foreignTrackId)
+			.map((t) => `"${t.title}" [${t.foreignTrackId}]`)
 			.join(', ');
 		const hint = tracks.length === 0
 			? 'Lidarr returned 0 tracks — metadata may not have synced yet, retry in a few minutes.'
-			: `Lidarr returned ${tracks.length} track(s); sample foreignTrackIds: [${sample}]`;
+			: `Lidarr returned ${tracks.length} track(s) but none matched by MBID or title. Sample: [${sample}]`;
 		markFailed(
 			item.id,
-			`Track MBID ${item.mbid} not found in Lidarr for artist ID ${lidarrArtistId}. ${hint}`
+			`Track "${item.title}" not found in Lidarr for artist ID ${lidarrArtistId}. ${hint}`
 		);
 		return;
 	}
