@@ -270,6 +270,11 @@ export async function getArtistByMbid(
 	return artists.find((a) => a.foreignArtistId === mbid) ?? null;
 }
 
+/** Fetch a single artist by Lidarr internal ID. */
+export function getArtist(id: number, fetchFn?: FetchFn): Promise<LidarrArtist> {
+	return request<LidarrArtist>('GET', `/api/v1/artist/${id}`, undefined, fetchFn);
+}
+
 /** Add a new artist to Lidarr. */
 export function addArtist(
 	payload: AddArtistPayload,

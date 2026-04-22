@@ -13,8 +13,10 @@
 import { getDb } from './db';
 import {
 	LidarrError,
+	getArtist,
 	getArtistByMbid,
 	addArtist,
+	updateArtist,
 	getAlbums,
 	updateAlbum,
 	getTracks,
@@ -337,6 +339,11 @@ async function scenarioB(item: ListItemRow, list: ListRow): Promise<void> {
 		if (existing) {
 			lidarrArtistId = existing.id;
 			upsertOwnership(item.artist_mbid, existing.id, list.id, existing.rootFolderPath);
+			// Lidarr won't download a track if the parent artist is unmonitored,
+			// even when the track itself is monitored.
+			if (!existing.monitored) {
+				await updateArtist({ ...existing, monitored: true });
+			}
 		} else {
 			// Add artist to Lidarr with all albums unmonitored — we'll monitor only this track below
 			const { qualityProfileId, metadataProfileId } = await resolveProfileIds(list);
@@ -377,10 +384,16 @@ async function scenarioB(item: ListItemRow, list: ListRow): Promise<void> {
 	const target = tracks.find((t) => t.foreignTrackId === item.mbid);
 
 	if (!target) {
+		const sample = tracks
+			.slice(0, 5)
+			.map((t) => t.foreignTrackId)
+			.join(', ');
+		const hint = tracks.length === 0
+			? 'Lidarr returned 0 tracks — metadata may not have synced yet, retry in a few minutes.'
+			: `Lidarr returned ${tracks.length} track(s); sample foreignTrackIds: [${sample}]`;
 		markFailed(
 			item.id,
-			`Track MBID ${item.mbid} not found in Lidarr for artist ID ${lidarrArtistId}. ` +
-				`Lidarr may not have synced metadata yet — retry in a few minutes.`
+			`Track MBID ${item.mbid} not found in Lidarr for artist ID ${lidarrArtistId}. ${hint}`
 		);
 		return;
 	}
@@ -451,6 +464,9 @@ async function scenarioC(item: ListItemRow, list: ListRow): Promise<void> {
 		if (existing) {
 			lidarrArtistId = existing.id;
 			upsertOwnership(item.artist_mbid, existing.id, list.id, existing.rootFolderPath);
+			if (!existing.monitored) {
+				await updateArtist({ ...existing, monitored: true });
+			}
 		} else {
 			const { qualityProfileId, metadataProfileId } = await resolveProfileIds(list);
 			const lidarrArtist = await addArtist({
