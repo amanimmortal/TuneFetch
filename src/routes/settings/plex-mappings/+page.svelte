@@ -36,8 +36,17 @@
       const result = await res.json();
       if (result.ok) {
         plexUsers = result.users;
-        if (plexUsers.length === 0) {
+        const failures: Array<{ title: string; reason: string }> = result.failures ?? [];
+        if (plexUsers.length === 0 && failures.length > 0) {
+          errorMessage =
+            `Found ${failures.length} Plex user(s) but could not retrieve tokens. ` +
+            failures.map((f) => `${f.title}: ${f.reason}`).join(' | ');
+        } else if (plexUsers.length === 0) {
           errorMessage = 'No managed users found on this Plex server.';
+        } else if (failures.length > 0) {
+          errorMessage =
+            `Loaded ${plexUsers.length} user(s). Could not retrieve tokens for: ` +
+            failures.map((f) => f.title).join(', ');
         }
       } else {
         errorMessage = result.error ?? 'Failed to fetch Plex users';

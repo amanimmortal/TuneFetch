@@ -97,6 +97,19 @@ export interface PlexManagedUser {
 	[key: string]: unknown;
 }
 
+/** A user whose token could not be retrieved in Step 2 of getManagedUsers(). */
+export interface PlexManagedUserFailure {
+	id: number;
+	title: string;
+	reason: string;
+}
+
+/** Return value of getManagedUsers(). */
+export interface GetManagedUsersResult {
+	users: PlexManagedUser[];
+	failures: PlexManagedUserFailure[];
+}
+
 /** A track result from a Plex library search. */
 export interface PlexTrack {
 	ratingKey: string;
@@ -261,7 +274,7 @@ export async function refreshLibrarySection(
  */
 export async function getManagedUsers(
 	fetchFn?: FetchFn
-): Promise<PlexManagedUser[]> {
+): Promise<GetManagedUsersResult> {
 	const config = readConfig();
 	const fn = fetchFn ?? fetch;
 
@@ -316,6 +329,7 @@ export async function getManagedUsers(
 	// ── Step 2: Get per-user token via switch ─────────────────────────────────
 	// POST /api/home/users/{id}/switch → XML response with authenticationToken attribute
 	const users: PlexManagedUser[] = [];
+	const failures: PlexManagedUserFailure[] = [];
 
 	for (const user of userList) {
 		try {
@@ -344,22 +358,24 @@ export async function getManagedUsers(
 						accessToken: token
 					});
 				} else {
-					console.warn(
-						`[plex] Switch succeeded for "${user.title}" but authenticationToken not found in XML`
-					);
+					const reason = `Switch succeeded but authenticationToken not found in XML. Response (first 500 chars): ${switchXml.substring(0, 500)}`;
+					console.error(`[plex] ${reason}`);
+					failures.push({ id: user.id, title: user.title, reason });
 				}
 			} else {
 				const errText = await switchResponse.text();
-				console.warn(
-					`[plex] Switch failed for "${user.title}" — HTTP ${switchResponse.status}: ${errText.substring(0, 200)}`
-				);
+				const reason = `HTTP ${switchResponse.status}: ${errText.substring(0, 200)}`;
+				console.error(`[plex] Switch failed for "${user.title}" — ${reason}`);
+				failures.push({ id: user.id, title: user.title, reason });
 			}
 		} catch (err) {
-			console.warn(`[plex] Exception switching to user "${user.title}":`, err);
+			const reason = describeFetchError(err);
+			console.error(`[plex] Exception switching to user "${user.title}": ${reason}`);
+			failures.push({ id: user.id, title: user.title, reason });
 		}
 	}
 
-	return users;
+	return { users, failures };
 }
 
 // ── Public API — Track Search ─────────────────────────────────────────────────

@@ -38,8 +38,8 @@ export const GET: RequestHandler = async ({ url, fetch: svelteKitFetch }) => {
 			}
 
 			case 'users': {
-				const users = await getManagedUsers(svelteKitFetch);
-				return json({ ok: true, users });
+				const { users, failures } = await getManagedUsers(svelteKitFetch);
+				return json({ ok: true, users, failures });
 			}
 
 			case 'mappings': {
