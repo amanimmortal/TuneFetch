@@ -287,7 +287,7 @@
 
           <!-- Actions -->
           <div class="flex flex-wrap items-center gap-2 mt-2 pt-3 border-t border-slate-800">
-            <form method="POST" action="?/addToList" use:enhance class="flex items-center gap-2 flex-1 min-w-0">
+            <form method="POST" action="?/addToList" use:enhance={() => async ({ update }) => update({ reset: false })} class="flex items-center gap-2 flex-1 min-w-0">
               <input type="hidden" name="mbid" value={r.mbid} />
               <input type="hidden" name="type" value={r.type} />
               <input type="hidden" name="title" value={r.title} />
@@ -337,7 +337,7 @@
                           {/each}
                         </div>
                         <div class="flex gap-2 shrink-0">
-                          <form method="POST" action="?/addToList" use:enhance class="flex items-center gap-1">
+                          <form method="POST" action="?/addToList" use:enhance={() => async ({ update }) => update({ reset: false })} class="flex items-center gap-1">
                             <input type="hidden" name="mbid" value={album.mbid} />
                             <input type="hidden" name="type" value="album" />
                             <input type="hidden" name="title" value={album.title} />
@@ -385,7 +385,7 @@
                                     {/each}
                                   </div>
                                 </div>
-                                <form method="POST" action="?/addToList" use:enhance class="flex items-center gap-1 shrink-0">
+                                <form method="POST" action="?/addToList" use:enhance={() => async ({ update }) => update({ reset: false })} class="flex items-center gap-1 shrink-0">
                                   <input type="hidden" name="mbid" value={track.mbid} />
                                   <input type="hidden" name="type" value="track" />
                                   <input type="hidden" name="title" value={track.title} />

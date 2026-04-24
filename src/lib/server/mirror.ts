@@ -10,7 +10,7 @@
  * All DB writes use getDb() and are synchronous (better-sqlite3).
  */
 
-import { promises as fs } from 'node:fs';
+import { promises as fs, constants as fsConstants } from 'node:fs';
 import { dirname, relative, join } from 'node:path';
 import { getDb } from './db';
 import { getTrackFiles } from './lidarr';
@@ -38,6 +38,26 @@ export function buildMirrorPath(
 ): string {
   const rel = relative(ownerRoot, sourcePath);
   return join(targetRoot, rel);
+}
+
+// ── Permission pre-flight ─────────────────────────────────────────────────────
+
+/**
+ * Verify that the process has write access to a directory.
+ *
+ * Throws a descriptive Error (rather than a raw EACCES) if the check fails,
+ * so users see actionable guidance in the logs before any copy is attempted.
+ */
+async function checkWritable(dir: string): Promise<void> {
+  try {
+    await fs.access(dir, fsConstants.W_OK);
+  } catch {
+    throw new Error(
+      `Mirror target directory "${dir}" is not writable by the current process user. ` +
+      `On Unraid, set PUID=99 and PGID=100 to match default share permissions, ` +
+      `and UMASK=000 so created files are readable by all shares.`
+    );
+  }
 }
 
 // ── Low-level copy ────────────────────────────────────────────────────────────
@@ -202,6 +222,9 @@ async function _runBackfill(
   ).run(listItemId);
 
   try {
+    // Fail fast with a human-readable message if the mount point isn't writable.
+    await checkWritable(targetRoot);
+
     const trackFiles = await getTrackFiles(lidarrArtistId);
 
     if (trackFiles.length === 0) {

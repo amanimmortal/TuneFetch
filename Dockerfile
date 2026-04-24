@@ -45,12 +45,16 @@ COPY --from=builder /build/package.json ./package.json
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
+# Default PUID/PGID is 1000 (standard Linux user).
+# Unraid users: set PUID=99, PGID=100 (nobody:users) to match share permissions,
+# and UMASK=000 so mirrored files are readable by all shares.
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     PORT=3000 \
     TUNEFETCH_DATA_DIR=/app/data \
     PUID=1000 \
     PGID=1000 \
+    UMASK="" \
     # Docker bridge networks often hand the container an IPv6 address with
     # no working v6 route. Node's happy-eyeballs then fails AAAA in
     # milliseconds with ETIMEDOUT, which surfaces as "MusicBrainz fetch
