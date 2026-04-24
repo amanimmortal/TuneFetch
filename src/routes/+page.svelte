@@ -188,32 +188,32 @@
     <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
       {#if type === 'artist'}
         <div class="sm:col-span-2 lg:col-span-3">
-          <label class="block text-xs text-slate-400 mb-1">Artist name</label>
-          <input type="text" class="input w-full" placeholder="e.g. Radiohead" bind:value={artistField} autofocus />
+          <label for="field-artist" class="block text-xs text-slate-400 mb-1">Artist name</label>
+          <input id="field-artist" type="text" class="input w-full" placeholder="e.g. Radiohead" bind:value={artistField} />
         </div>
       {/if}
       {#if type === 'album'}
         <div>
-          <label class="block text-xs text-slate-400 mb-1">Album title</label>
-          <input type="text" class="input w-full" placeholder="e.g. OK Computer" bind:value={albumField} autofocus />
+          <label for="field-album" class="block text-xs text-slate-400 mb-1">Album title</label>
+          <input id="field-album" type="text" class="input w-full" placeholder="e.g. OK Computer" bind:value={albumField} />
         </div>
         <div>
-          <label class="block text-xs text-slate-400 mb-1">Artist <span class="text-slate-500">(optional)</span></label>
-          <input type="text" class="input w-full" placeholder="e.g. Radiohead" bind:value={artistField} />
+          <label for="field-artist-album" class="block text-xs text-slate-400 mb-1">Artist <span class="text-slate-500">(optional)</span></label>
+          <input id="field-artist-album" type="text" class="input w-full" placeholder="e.g. Radiohead" bind:value={artistField} />
         </div>
       {/if}
       {#if type === 'track'}
         <div>
-          <label class="block text-xs text-slate-400 mb-1">Track title</label>
-          <input type="text" class="input w-full" placeholder="e.g. Karma Police" bind:value={trackField} autofocus />
+          <label for="field-track" class="block text-xs text-slate-400 mb-1">Track title</label>
+          <input id="field-track" type="text" class="input w-full" placeholder="e.g. Karma Police" bind:value={trackField} />
         </div>
         <div>
-          <label class="block text-xs text-slate-400 mb-1">Artist <span class="text-slate-500">(optional)</span></label>
-          <input type="text" class="input w-full" placeholder="e.g. Radiohead" bind:value={artistField} />
+          <label for="field-artist-track" class="block text-xs text-slate-400 mb-1">Artist <span class="text-slate-500">(optional)</span></label>
+          <input id="field-artist-track" type="text" class="input w-full" placeholder="e.g. Radiohead" bind:value={artistField} />
         </div>
         <div>
-          <label class="block text-xs text-slate-400 mb-1">Album <span class="text-slate-500">(optional)</span></label>
-          <input type="text" class="input w-full" placeholder="e.g. OK Computer" bind:value={albumField} />
+          <label for="field-album-track" class="block text-xs text-slate-400 mb-1">Album <span class="text-slate-500">(optional)</span></label>
+          <input id="field-album-track" type="text" class="input w-full" placeholder="e.g. OK Computer" bind:value={albumField} />
         </div>
       {/if}
     </div>
@@ -221,8 +221,8 @@
     <!-- Sort + Submit -->
     <div class="flex flex-wrap gap-3 items-end pt-1">
       <div>
-        <label class="block text-xs text-slate-400 mb-1">Sort by</label>
-        <select class="input sm:w-44" bind:value={sortBy}>
+        <label for="sort-by" class="block text-xs text-slate-400 mb-1">Sort by</label>
+        <select id="sort-by" class="input sm:w-44" bind:value={sortBy}>
           <option value="relevance">Relevance</option>
           <option value="title-asc">Title A→Z</option>
           <option value="title-desc">Title Z→A</option>
@@ -336,7 +336,6 @@
                           {/each}
                         </div>
                         <div class="flex gap-2 shrink-0">
-                          <!-- Add album -->
                           <form method="POST" action="?/addToList" use:enhance class="flex items-center gap-1">
                             <input type="hidden" name="mbid" value={album.mbid} />
                             <input type="hidden" name="type" value="album" />
@@ -354,7 +353,6 @@
                               <button type="submit" class="btn-secondary h-7 px-2 text-xs">Add</button>
                             {/if}
                           </form>
-                          <!-- Browse tracks -->
                           <button type="button" class="btn-secondary h-7 px-2 text-xs whitespace-nowrap"
                             on:click={() => toggleAlbumTracks(album.mbid, r.title, r.mbid, album.title)}>
                             {expandedAlbumMbid === album.mbid ? 'Hide' : 'Tracks'}

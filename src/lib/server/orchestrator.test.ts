@@ -27,10 +27,10 @@ vi.mock('./lidarr', () => ({
   },
   getArtistByMbid: vi.fn(),
   addArtist:       vi.fn(),
+  getAlbum:        vi.fn(),
   getAlbums:       vi.fn(),
   updateAlbum:     vi.fn(),
   getTracks:       vi.fn(),
-  updateTrack:     vi.fn(),
   runCommand:      vi.fn(),
 }));
 
@@ -47,10 +47,10 @@ import { getDb } from './db';
 import {
   getArtistByMbid,
   addArtist,
+  getAlbum,
   getAlbums,
   updateAlbum,
   getTracks,
-  updateTrack,
   runCommand,
 } from './lidarr';
 import { startBackfill } from './mirror';
@@ -59,10 +59,10 @@ import { orchestrate } from './orchestrator';
 const mockGetDb       = vi.mocked(getDb);
 const mockGetArtist   = vi.mocked(getArtistByMbid);
 const mockAddArtist   = vi.mocked(addArtist);
+const mockGetAlbum    = vi.mocked(getAlbum);
 const mockGetAlbums   = vi.mocked(getAlbums);
 const mockUpdateAlbum = vi.mocked(updateAlbum);
 const mockGetTracks   = vi.mocked(getTracks);
-const mockUpdateTrack = vi.mocked(updateTrack);
 const mockRunCommand  = vi.mocked(runCommand);
 const mockBackfill    = vi.mocked(startBackfill);
 
@@ -218,8 +218,9 @@ describe('Scenario B — track type', () => {
     vi.clearAllMocks();
     db = makeDb();
     mockGetDb.mockReturnValue(db as any);
-    mockRunCommand.mockResolvedValue({ id: 1, name: 'TrackSearch', status: 'queued' });
-    mockUpdateTrack.mockResolvedValue({} as any);
+    mockRunCommand.mockResolvedValue({ id: 1, name: 'AlbumSearch', status: 'queued' });
+    mockGetAlbum.mockResolvedValue({ id: 5, monitored: false } as any);
+    mockUpdateAlbum.mockResolvedValue({} as any);
   });
 
   const mockTrackList = [
@@ -238,11 +239,12 @@ describe('Scenario B — track type', () => {
       foreignArtistId: ARTIST_MBID,
       addOptions: { monitor: 'none', searchForMissingAlbums: false },
     }));
-    expect(mockUpdateTrack).toHaveBeenCalledWith(expect.objectContaining({
-      foreignTrackId: TRACK_MBID,
+    expect(mockGetAlbum).toHaveBeenCalledWith(5);
+    expect(mockUpdateAlbum).toHaveBeenCalledWith(expect.objectContaining({
+      id: 5,
       monitored: true,
     }));
-    expect(mockRunCommand).toHaveBeenCalledWith('TrackSearch', { trackIds: [10] });
+    expect(mockRunCommand).toHaveBeenCalledWith('AlbumSearch', { albumIds: [5] });
 
     const { sync_status } = getSyncStatus(db, itemId);
     expect(sync_status).toBe('synced');
@@ -260,8 +262,9 @@ describe('Scenario B — track type', () => {
     await orchestrate(itemId);
 
     expect(mockAddArtist).not.toHaveBeenCalled();
-    expect(mockUpdateTrack).toHaveBeenCalledWith(expect.objectContaining({ monitored: true }));
-    expect(mockRunCommand).toHaveBeenCalledWith('TrackSearch', { trackIds: [10] });
+    expect(mockGetAlbum).toHaveBeenCalledWith(5);
+    expect(mockUpdateAlbum).toHaveBeenCalledWith(expect.objectContaining({ id: 5, monitored: true }));
+    expect(mockRunCommand).toHaveBeenCalledWith('AlbumSearch', { albumIds: [5] });
 
     const { sync_status } = getSyncStatus(db, itemId);
     expect(sync_status).toBe('synced');
@@ -278,7 +281,7 @@ describe('Scenario B — track type', () => {
     await orchestrate(itemId);
 
     expect(mockBackfill).toHaveBeenCalledWith(42, itemId, '/root/a', '/root/b');
-    expect(mockUpdateTrack).not.toHaveBeenCalled();
+    expect(mockUpdateAlbum).not.toHaveBeenCalled();
     const { sync_status } = getSyncStatus(db, itemId);
     expect(sync_status).toBe('mirror_pending');
   });

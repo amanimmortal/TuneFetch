@@ -44,7 +44,7 @@ if (!building) {
 	try {
 		setGlobalDispatcher(
 			new Agent({
-				connect: { family: 4 }
+				connect: { family: 4 } as any
 			})
 		);
 		console.log('[env] undici dispatcher pinned to IPv4 (family=4).');

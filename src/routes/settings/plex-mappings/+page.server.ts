@@ -14,6 +14,7 @@ interface UserMapping {
 	root_folder_path: string;
 	plex_user_name: string;
 	plex_user_token: string;
+	library_section_id: string | null;
 	created_at: string;
 }
 

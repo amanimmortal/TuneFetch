@@ -160,8 +160,3 @@ export const POST: RequestHandler = async ({ request, fetch: svelteKitFetch }) =
 		throw err;
 	}
 };
-
-		}
-		throw err;
-	}
-};
