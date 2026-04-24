@@ -28,6 +28,7 @@
 	let albumTracksLoading: Record<string, boolean> = {};
 	let albumTracksError: Record<string, string | null> = {};
 
+	$: canSearch = !!(artistField.trim() || albumField.trim() || trackField.trim());
 	$: sortedResults = sortResults(results, sortBy);
 
 	function sortResults(items: any[], sort: string): any[] {
@@ -232,7 +233,7 @@
           {/if}
         </select>
       </div>
-      <button type="submit" class="btn-primary h-9 py-1" disabled={searching || !hasAnyField()}>
+      <button type="submit" class="btn-primary h-9 py-1" disabled={searching || !canSearch}>
         {searching ? 'Searching…' : 'Search'}
       </button>
     </div>
