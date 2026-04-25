@@ -160,6 +160,12 @@ async function request<T>(
 	path: string,
 	options: {
 		token?: string;
+		/**
+		 * When set, adds an X-Plex-User-Token header alongside the primary token.
+		 * Use this to perform a request as the admin (auth) but scoped to a
+		 * managed user's library perspective — the documented Plex Home API pattern.
+		 */
+		userToken?: string;
 		body?: unknown;
 		fetchFn?: FetchFn;
 		/** If true, read config; if false, use provided base URL. */
@@ -179,17 +185,22 @@ async function request<T>(
 		url += (url.includes('?') ? '&' : '?') + qs;
 	}
 
+	const headers: Record<string, string> = {
+		'X-Plex-Token': token,
+		'X-Plex-Client-Identifier': PLEX_CLIENT_ID,
+		'X-Plex-Product': PLEX_PRODUCT,
+		Accept: 'application/json',
+		'Content-Type': 'application/json'
+	};
+	if (options.userToken) {
+		headers['X-Plex-User-Token'] = options.userToken;
+	}
+
 	let response: Response;
 	try {
 		response = await fetchFn(url, {
 			method,
-			headers: {
-				'X-Plex-Token': token,
-				'X-Plex-Client-Identifier': PLEX_CLIENT_ID,
-				'X-Plex-Product': PLEX_PRODUCT,
-				Accept: 'application/json',
-				'Content-Type': 'application/json'
-			},
+			headers,
 			body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
 			signal: AbortSignal.timeout(15_000)
 		});
@@ -398,15 +409,16 @@ export async function searchTrack(
 	}
 
 	// Search by track title within the music library section (type=10 = track).
-	// Use the user's own token so the search runs against their library view —
-	// the admin token may not see user-specific library sections.
+	// Use the admin token for authentication (avoids 401 with managed-user cloud tokens)
+	// but pass the user's token as X-Plex-User-Token so the PMS serves results
+	// from that user's library perspective — the documented Plex Home API pattern.
 	const searchQuery = encodeURIComponent(trackTitle);
 	const raw = await request<{
 		MediaContainer: { Metadata?: PlexTrack[] };
 	}>(
 		'GET',
 		`/library/sections/${sectionId}/search?type=10&query=${searchQuery}`,
-		{ token: userToken, fetchFn }
+		{ userToken, fetchFn }
 	);
 
 	const results = raw.MediaContainer.Metadata ?? [];
