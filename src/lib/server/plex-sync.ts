@@ -151,7 +151,7 @@ export async function syncListToPlexPlaylist(
 		}
 
 		try {
-			const track = await searchTrack(item.artist_name, item.title, librarySectionId);
+			const track = await searchTrack(item.artist_name, item.title, librarySectionId, row.plex_user_token);
 			if (track) {
 				foundItems.push({
 					listItemId: item.id,
