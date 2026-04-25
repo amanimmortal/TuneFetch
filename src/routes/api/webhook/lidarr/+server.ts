@@ -1,7 +1,7 @@
 /**
  * Lidarr webhook endpoint.
  *
- * Register this URL in Lidarr under Settings → Connect → Webhook:
+ * Register this URL in Lidarr under Settings -> Connect -> Webhook:
  *   URL:    http://<tunefetch-host>:3000/api/webhook/lidarr
  *   Method: POST
  *   Events: On Download, On Upgrade
@@ -10,13 +10,14 @@
  * share the same Docker host and communicate over the internal network.
  *
  * Handles two cases:
- *   eventType=Download, isUpgrade=false → copy new files to secondary lists
- *   eventType=Download, isUpgrade=true  → re-copy upgraded files over existing mirrors
+ *   eventType=Download, isUpgrade=false -- copy new files to secondary lists
+ *   eventType=Download, isUpgrade=true  -- re-copy upgraded files over existing mirrors
  */
 
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { getDb } from '$lib/server/db';
+import { env } from '$lib/server/env';
 import { mirrorTrackFile, remirrorUpgrade } from '$lib/server/mirror';
 import { refreshLibrarySection } from '$lib/server/plex';
 import { triggerSyncForArtist, getSectionIdsForArtist } from '$lib/server/plex-sync';
@@ -42,7 +43,7 @@ interface LidarrWebhookPayload {
   isUpgrade?: boolean;
   artist?: WebhookArtist;
   trackFiles?: WebhookTrackFile[];
-  /** Present on upgrade events — the files being replaced. */
+  /** Present on upgrade events -- the files being replaced. */
   deletedFiles?: WebhookTrackFile[];
 }
 
@@ -56,6 +57,17 @@ interface MirrorCandidate {
 // ── Handler ───────────────────────────────────────────────────────────────────
 
 export const POST: RequestHandler = async ({ request }) => {
+  // Verify shared secret when LIDARR_WEBHOOK_SECRET is configured.
+  // In Lidarr: Settings -> Connect -> Webhook -> add custom header X-TuneFetch-Secret.
+  const expected = env.LIDARR_WEBHOOK_SECRET;
+  if (expected) {
+    const provided = request.headers.get('x-tunefetch-secret');
+    if (provided !== expected) {
+      console.warn('[webhook] Rejected request with invalid or missing X-TuneFetch-Secret');
+      return json({ error: 'unauthorized' }, { status: 401 });
+    }
+  }
+
   let payload: LidarrWebhookPayload;
   try {
     payload = await request.json() as LidarrWebhookPayload;
@@ -63,7 +75,7 @@ export const POST: RequestHandler = async ({ request }) => {
     return json({ error: 'Invalid JSON payload' }, { status: 400 });
   }
 
-  // Test event — Lidarr sends this when you first configure the webhook
+  // Test event -- Lidarr sends this when you first configure the webhook
   if (payload.eventType === 'Test') {
     console.log('[webhook] Lidarr test event received — webhook is reachable.');
     return json({ ok: true, event: 'Test' });
@@ -103,7 +115,7 @@ export const POST: RequestHandler = async ({ request }) => {
           )
         );
       } else {
-        // No matching new file — mark existing mirrors as stale
+        // No matching new file -- mark existing mirrors as stale
         db.prepare(
           `UPDATE mirror_files
               SET status = 'stale', updated_at = CURRENT_TIMESTAMP
@@ -135,7 +147,7 @@ export const POST: RequestHandler = async ({ request }) => {
     .get(lidarrArtistId) as { root_folder_path: string } | undefined;
 
   if (!ownerRow) {
-    // Artist not tracked by TuneFetch — nothing to mirror.
+    // Artist not tracked by TuneFetch -- nothing to mirror.
     return json({ ok: true, ignored: true, reason: 'artist not in artist_ownership' });
   }
 
@@ -166,12 +178,23 @@ export const POST: RequestHandler = async ({ request }) => {
       tasks.push(
         mirrorTrackFile(trackFile.path, candidate.list_item_id, ownerRoot, candidate.target_root)
           .then(() => {
-            // If the item was waiting for its first file, it's now active.
-            db.prepare(
-              `UPDATE list_items
-                  SET sync_status = 'synced', sync_error = NULL
-                WHERE id = ? AND sync_status = 'mirror_pending'`
-            ).run(candidate.list_item_id);
+            // Only flip status inside a transaction, and only after confirming
+            // an active mirror_files row exists. This prevents a race where two
+            // concurrent webhooks for the same artist both see mirror_pending
+            // and one of them flips status before the other's copy completes.
+            db.transaction(() => {
+              const haveActive = db.prepare(
+                `SELECT 1 FROM mirror_files
+                  WHERE list_item_id = ? AND status = 'active' LIMIT 1`
+              ).get(candidate.list_item_id);
+              if (haveActive) {
+                db.prepare(
+                  `UPDATE list_items
+                      SET sync_status = 'synced', sync_error = NULL
+                    WHERE id = ? AND sync_status = 'mirror_pending'`
+                ).run(candidate.list_item_id);
+              }
+            })();
           })
           .catch((err) => {
             console.error(

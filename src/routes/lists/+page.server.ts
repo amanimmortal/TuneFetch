@@ -1,4 +1,4 @@
-﻿import { fail } from "@sveltejs/kit";
+import { fail } from "@sveltejs/kit";
 import type { Actions, PageServerLoad } from "./$types";
 import { getDb } from "$lib/server/db";
 import {
@@ -204,19 +204,29 @@ export const actions: Actions = {
 				};
 			}
 
-			// confirmed && no blocked — perform ownership transfers
+			// confirmed && no blocked -- perform ownership transfers.
+			// Lidarr update must succeed before we touch the DB; otherwise
+			// Lidarr still owns the artist under the old root folder but
+			// TuneFetch would show it as deleted, creating orphaned mirrors.
+			const lidarrArtists = await listArtists().catch((err) => {
+				console.error('[delete] Could not fetch Lidarr artists for ownership transfer:', err);
+				return null;
+			});
+
 			for (const artist of transferable) {
-				// Best-effort: update Lidarr rootFolderPath (Lidarr will physically move files)
-				try {
-					const lidarrArtists = await listArtists();
-					const lidarrArtist = lidarrArtists.find((a) => a.id === artist.lidarr_artist_id);
-					if (lidarrArtist) {
+				const lidarrArtist = lidarrArtists?.find((a) => a.id === artist.lidarr_artist_id);
+				if (lidarrArtist) {
+					try {
 						await updateArtist({ ...lidarrArtist, rootFolderPath: artist.newOwnerRootFolder });
+					} catch (err) {
+						console.error(
+							`[delete] Lidarr ownership transfer failed for artist ${artist.artist_mbid}:`, err
+						);
+						return fail(502, {
+							deleteError: `Lidarr ownership transfer failed for artist "${artist.display_name}". ` +
+								`The list was not deleted. Check that Lidarr is reachable and try again.`
+						});
 					}
-				} catch {
-					console.error(
-						`[delete] Failed to update Lidarr rootFolderPath for artist ${artist.artist_mbid} — continuing with DB transfer`
-					);
 				}
 
 				// Update ownership record in DB
@@ -228,7 +238,7 @@ export const actions: Actions = {
 			}
 		}
 
-		// Delete the list — cascades to list_items and mirror_files
+		// Delete the list -- cascades to list_items and mirror_files
 		db.prepare("DELETE FROM lists WHERE id = ?").run(id);
 		return { deleted: true };
 	}

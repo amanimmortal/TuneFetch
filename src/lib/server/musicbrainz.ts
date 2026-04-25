@@ -134,6 +134,18 @@ export interface MBRecording {
 }
 
 /**
+ * Escape MusicBrainz Lucene special characters in a field value.
+ * MusicBrainz uses Lucene query syntax; unescaped chars like /, (, ), +, etc.
+ * produce malformed queries or wildcard-matched garbage.
+ *
+ * Characters escaped: + - ! ( ) { } [ ] ^ ~ * ? : / \ and operators && ||
+ */
+const LUCENE_SPECIALS = /([+\-!(){}[\]^"~*?:\\/]|&&|\|\|)/g;
+export function escapeLucene(v: string): string {
+	return v.trim().replace(LUCENE_SPECIALS, '\\$1');
+}
+
+/**
  * Build a MusicBrainz Lucene query string from named fields.
  * e.g. buildQuery({ recording: 'Yesterday', artist: 'Beatles' })
  *   => 'recording:"Yesterday" AND artist:"Beatles"'
@@ -141,7 +153,7 @@ export interface MBRecording {
 export function buildQuery(fields: Record<string, string>): string {
 	return Object.entries(fields)
 		.filter(([, v]) => v.trim().length > 0)
-		.map(([k, v]) => `${k}:"${v.trim().replace(/"/g, '\\"')}"`)
+		.map(([k, v]) => `${k}:"${escapeLucene(v).replace(/"/g, '\\"')}"`)
 		.join(' AND ');
 }
 

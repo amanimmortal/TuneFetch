@@ -215,15 +215,23 @@ This check must happen on every push, not just the first time, because Lidarr's 
 
 *Triggered when a user adds a single track to a list.*
 
+> **API limitation (resolved 2026-04):** Lidarr's REST API does not expose a
+> PUT endpoint for individual track monitoring — `/api/v1/track` and
+> `/api/v1/track/{id}` are GET-only. Per-track monitoring via the API is not
+> possible. TuneFetch therefore monitors the **parent album** when a single
+> track is requested. Lidarr downloads the full album; **only the requested
+> track is added to the user's Plex playlist**. Storage cost is negligible
+> compared to re-downloading. This is the accepted v1 behaviour.
+
 1. **Artist ownership check.**
 2. If artist does **not** exist in Lidarr:
    - `POST /api/v1/artist` with `addOptions.monitor: "none"` and the correct `rootFolderPath`. Artist and all albums added **unmonitored**.
-3. Ensure the parent album exists in Lidarr (it will be added automatically with the artist in step 2, but unmonitored).
+3. Ensure the parent album exists in Lidarr (it is added automatically with the artist in step 2, unmonitored).
 4. `GET /api/v1/track?artistId=<id>` — retrieve all tracks for the artist.
-5. Find the target track by MBID.
-6. `PUT /api/v1/track` — set `monitored: true` for the target track only.
-7. Trigger a track search: `POST /api/v1/command` with `{ "name": "TrackSearch", "trackIds": [<id>] }`.
-8. If artist **already exists** in Lidarr under a different root folder → proceed to mirror workflow (Section 4E) instead of pushing to Lidarr again. Mirror only the specific requested track, not the entire artist.
+5. Find the target track by MBID (fall back to normalised title match if MBID misses).
+6. Monitor the parent album: `PUT /api/v1/album` with `monitored: true` for the album containing the track.
+7. Trigger an album search: `POST /api/v1/command` with `{ "name": "AlbumSearch", "albumIds": [<albumId>] }`.
+8. If artist **already exists** in Lidarr under a different root folder → proceed to mirror workflow (Section 4E). Mirror only the specific requested track's file, not all tracks for the artist.
 
 #### Scenario C: Album Type — Full Album Add
 
@@ -445,7 +453,7 @@ CREATE TABLE settings (
 | GET | `/api/v1/album?artistId=<id>` | Get albums for an artist |
 | PUT | `/api/v1/album` | Update album monitoring state |
 | GET | `/api/v1/track?artistId=<id>` | Get all tracks for an artist |
-| PUT | `/api/v1/track` | Update track monitoring state |
+| ~~PUT~~ | ~~`/api/v1/track`~~ | ~~Update track monitoring state~~ — **not implemented by Lidarr API; GET-only** |
 | POST | `/api/v1/command` | Trigger search (ArtistSearch, AlbumSearch, TrackSearch) |
 
 ---

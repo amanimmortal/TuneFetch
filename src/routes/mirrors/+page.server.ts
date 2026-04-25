@@ -1,7 +1,7 @@
 import { fail } from '@sveltejs/kit';
 import type { Actions, PageServerLoad } from './$types';
 import { getDb } from '$lib/server/db';
-import { copyFile } from '$lib/server/mirror';
+import { enqueueRefreshStaleAll } from '$lib/server/mirror';
 import { runOrphanScan } from '$lib/server/scheduler';
 
 // ── Row types ─────────────────────────────────────────────────────────────────
@@ -120,42 +120,14 @@ export const load: PageServerLoad = async () => {
 
 export const actions: Actions = {
   /**
-   * Re-copy all stale mirror files from their current source paths.
-   * Marks each as 'active' on success, leaves as 'stale' on failure.
+   * Enqueue re-copy of all stale mirror files as a background job.
+   * Returns immediately with the count of files queued so the UI can show
+   * feedback without holding the HTTP connection open for large backlogs.
+   * Progress is visible on the next page reload (status updates per-file).
    */
   refreshStale: async () => {
-    const db = getDb();
-    const staleRows = db
-      .prepare(
-        `SELECT id, source_path, mirror_path FROM mirror_files WHERE status = 'stale'`
-      )
-      .all() as Array<{ id: number; source_path: string; mirror_path: string }>;
-
-    let refreshed = 0;
-    let failed = 0;
-
-    for (const row of staleRows) {
-      try {
-        await copyFile(row.source_path, row.mirror_path);
-        db.prepare(
-          `UPDATE mirror_files
-              SET status = 'active', updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?`
-        ).run(row.id);
-        refreshed++;
-      } catch (err) {
-        console.error(`[mirrors] refreshStale failed for ${row.source_path}:`, err);
-        failed++;
-      }
-    }
-
-    if (failed > 0 && refreshed === 0) {
-      return fail(500, {
-        refreshError: `All ${failed} refresh operations failed. Check that source files exist.`
-      });
-    }
-
-    return { refreshed, failed };
+    const queued = enqueueRefreshStaleAll();
+    return { queued };
   },
 
   /**

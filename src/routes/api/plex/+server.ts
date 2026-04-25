@@ -12,6 +12,7 @@ import {
 } from '$lib/server/plex';
 import { syncListToPlexPlaylist } from '$lib/server/plex-sync';
 import { getDb } from '$lib/server/db';
+import { encrypt } from '$lib/server/crypto';
 
 // ── GET /api/plex?action=... ──────────────────────────────────────────────────
 
@@ -103,7 +104,7 @@ export const POST: RequestHandler = async ({ request, fetch: svelteKitFetch }) =
 					   plex_user_name = excluded.plex_user_name,
 					   plex_user_token = excluded.plex_user_token,
 					   library_section_id = excluded.library_section_id`
-				).run(root_folder_path, plex_user_name, plex_user_token, library_section_id ?? '');
+				).run(root_folder_path, plex_user_name, encrypt(plex_user_token), library_section_id ?? '');
 				return json({ ok: true });
 			}
 
@@ -126,7 +127,7 @@ export const POST: RequestHandler = async ({ request, fetch: svelteKitFetch }) =
 						`INSERT INTO plex_playlists (list_id, plex_user_token, plex_user_name, playlist_title)
 						 VALUES (?, ?, ?, ?)`
 					)
-					.run(list_id, plex_user_token, plex_user_name, playlist_title);
+					.run(list_id, encrypt(plex_user_token), plex_user_name, playlist_title);
 				return json({ ok: true, id: result.lastInsertRowid });
 			}
 

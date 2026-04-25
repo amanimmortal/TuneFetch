@@ -117,6 +117,15 @@ export const GET: RequestHandler = async ({ url }) => {
 			console.error('Lidarr match failed, proceeding without Lidarr badges:', e);
 		}
 
+		// Cap results at 900 to stay within the SQLite parameter limit and avoid
+		// overloading the UI. Surface capped/total so the UI can display a hint.
+		const totalResults = results.length;
+		if (results.length > 900) {
+			results = results.slice(0, 900);
+			mbids = mbids.slice(0, 900);
+		}
+		const wasCapped = totalResults > 900;
+
 		// List Memberships Match
 		if (mbids.length > 0) {
 			const batchMbids = mbids.slice(0, 900);
@@ -140,7 +149,7 @@ export const GET: RequestHandler = async ({ url }) => {
 			}
 		}
 
-		return json({ results });
+		return json({ results, capped: wasCapped, total: totalResults });
 	} catch (e: unknown) {
 		console.error('Search API error:', e);
 		return json(

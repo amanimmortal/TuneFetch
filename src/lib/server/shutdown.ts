@@ -12,11 +12,13 @@
 
 import { closeDb } from './db';
 import { flushPendingCopies } from './mirror';
+import { cancelAllRetries } from './plex-sync';
 
 let _registered = false;
 
 async function gracefulShutdown(signal: string): Promise<void> {
-  console.log(`[shutdown] ${signal} received — flushing pending mirror jobs...`);
+  console.log(`[shutdown] ${signal} received — cancelling Plex retries and flushing mirror jobs...`);
+  cancelAllRetries();
   try {
     await flushPendingCopies(15_000);
   } catch (err) {

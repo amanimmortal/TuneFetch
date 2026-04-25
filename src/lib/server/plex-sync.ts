@@ -22,6 +22,12 @@ import {
 	getPlaylistItems,
 	PlexError
 } from './plex';
+import { decrypt, isEncrypted } from './crypto';
+
+/** Decrypt a Plex token that may be stored encrypted or as legacy plaintext. */
+function resolveToken(stored: string): string {
+	return isEncrypted(stored) ? decrypt(stored) : stored;
+}
 
 // ── DB row types ──────────────────────────────────────────────────────────────
 
@@ -83,10 +89,14 @@ export async function syncListToPlexPlaylist(
 		throw new Error(`plex_playlists row ${plexPlaylistDbId} not found`);
 	}
 
-	// Look up the library_section_id from the user mapping (matched by token)
+	// Decrypt the stored token -- it may be plaintext (legacy) or encrypted.
+	const plexToken = resolveToken(row.plex_user_token);
+
+	// Look up the library_section_id from the user mapping (matched by user name,
+	// since tokens are now encrypted with per-row random IVs and cannot be compared).
 	const userMapping = db
-		.prepare('SELECT library_section_id FROM plex_user_mappings WHERE plex_user_token = ?')
-		.get(row.plex_user_token) as { library_section_id: string } | undefined;
+		.prepare('SELECT library_section_id FROM plex_user_mappings WHERE plex_user_name = ?')
+		.get(row.plex_user_name) as { library_section_id: string } | undefined;
 
 	const librarySectionId = userMapping?.library_section_id ?? '';
 	if (!librarySectionId) {
@@ -130,7 +140,7 @@ export async function syncListToPlexPlaylist(
 	const newItems = items.filter((item) => !alreadySynced.has(item.id));
 
 	if (newItems.length === 0 && row.plex_playlist_id) {
-		// Nothing to do — update last_synced_at
+		// Nothing to do -- update last_synced_at
 		db.prepare('UPDATE plex_playlists SET last_synced_at = CURRENT_TIMESTAMP WHERE id = ?')
 			.run(row.id);
 		return result;
@@ -146,12 +156,12 @@ export async function syncListToPlexPlaylist(
 		// Only sync track-type items or items where we have artist+title
 		// Album and artist types don't have individual tracks to add
 		if (item.type === 'artist') {
-			// Skip artist-type items — playlists contain tracks, not artists
+			// Skip artist-type items -- playlists contain tracks, not artists
 			continue;
 		}
 
 		try {
-			const track = await searchTrack(item.artist_name, item.title, librarySectionId, row.plex_user_token);
+			const track = await searchTrack(item.artist_name, item.title, librarySectionId, plexToken);
 			if (track) {
 				foundItems.push({
 					listItemId: item.id,
@@ -175,7 +185,7 @@ export async function syncListToPlexPlaylist(
 	}
 
 	if (foundItems.length === 0 && !row.plex_playlist_id) {
-		// No items found and no playlist exists yet — nothing to create
+		// No items found and no playlist exists yet -- nothing to create
 		db.prepare('UPDATE plex_playlists SET last_synced_at = CURRENT_TIMESTAMP WHERE id = ?')
 			.run(row.id);
 		return result;
@@ -187,7 +197,7 @@ export async function syncListToPlexPlaylist(
 	if (!playlistId && foundItems.length > 0) {
 		try {
 			playlistId = await createPlaylist(
-				row.plex_user_token,
+				plexToken,
 				row.playlist_title,
 				foundItems.map((f) => f.ratingKey)
 			);
@@ -219,7 +229,7 @@ export async function syncListToPlexPlaylist(
 	if (playlistId && foundItems.length > 0) {
 		try {
 			await addToPlaylist(
-				row.plex_user_token,
+				plexToken,
 				playlistId,
 				foundItems.map((f) => f.ratingKey)
 			);
@@ -253,7 +263,7 @@ const _retryTimers = new Map<number, ReturnType<typeof setTimeout>>();
 /** Maximum number of retry attempts before giving up. */
 const MAX_RETRIES = 5;
 
-/** Backoff schedule in milliseconds: 30s → 2min → 5min → 15min → 30min. */
+/** Backoff schedule in milliseconds: 30s -> 2min -> 5min -> 15min -> 30min. */
 const BACKOFF_MS = [30_000, 120_000, 300_000, 900_000, 1_800_000];
 
 /**
@@ -287,7 +297,7 @@ function _retryWithBackoff(plexPlaylistDbId: number, attempt: number): void {
 			const result = await syncListToPlexPlaylist(plexPlaylistDbId);
 
 			if (result.notFound > 0 && attempt + 1 < MAX_RETRIES) {
-				// Some tracks still not found — retry with backoff
+				// Some tracks still not found -- retry with backoff
 				console.log(
 					`[plex-sync] ${result.notFound} track(s) not found in Plex for playlist ${plexPlaylistDbId}, retrying...`
 				);
@@ -359,7 +369,7 @@ export function getSectionIdsForArtist(lidarrArtistId: number): string[] {
 			`SELECT DISTINCT m.library_section_id
        FROM plex_playlists pp
        JOIN list_items li ON li.list_id = pp.list_id
-       JOIN plex_user_mappings m ON m.plex_user_token = pp.plex_user_token
+       JOIN plex_user_mappings m ON m.plex_user_name = pp.plex_user_name
        WHERE li.lidarr_artist_id = ?
          AND li.sync_status IN ('synced', 'mirror_pending', 'mirror_active')
          AND m.library_section_id != ''`

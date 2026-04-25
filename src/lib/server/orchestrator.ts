@@ -64,6 +64,23 @@ interface OwnershipRow {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /**
+ * Normalize a track title for fuzzy comparison.
+ * - Lowercases
+ * - Strips Unicode accent marks (NFD decomposition)
+ * - Strips all non-alphanumeric characters
+ *
+ * This lets titles like "Résumé (Live)", "AC/DC", and "What If?" match their
+ * Lidarr counterparts despite punctuation and encoding differences.
+ */
+function normalizeTitle(s: string): string {
+	return s
+		.toLowerCase()
+		.normalize('NFD')
+		.replace(/[̀-ͯ]/g, '') // strip combining diacritics
+		.replace(/[^a-z0-9]/g, '');       // strip punctuation, spaces, special chars
+}
+
+/**
  * Mark a list_item as failed with an error message.
  * Always runs outside any outer transaction so partial failures are recorded.
  */
@@ -304,16 +321,18 @@ async function scenarioB(item: ListItemRow, list: ListRow): Promise<void> {
 	}
 
 	if (!lidarrArtistId) {
-		// Fallback: sibling list_items with the same artist_name that are synced
+		// Fallback: sibling list_items for the same MusicBrainz artist that are synced.
+		// Join on artist_mbid (immutable) rather than lidarr_artist_id, which can be
+		// reused if Lidarr deletes and re-adds an artist entry with a different MBID.
 		const related = db
 			.prepare(
 				`SELECT li.lidarr_artist_id, ao.artist_mbid
            FROM list_items li
-           JOIN artist_ownership ao ON ao.lidarr_artist_id = li.lidarr_artist_id
-           WHERE li.artist_name = ? AND li.lidarr_artist_id IS NOT NULL
+           JOIN artist_ownership ao ON ao.artist_mbid = li.artist_mbid
+           WHERE li.artist_mbid = ? AND li.artist_mbid IS NOT NULL AND li.lidarr_artist_id IS NOT NULL
            LIMIT 1`
 			)
-			.get(item.artist_name) as
+			.get(item.artist_mbid) as
 			| { lidarr_artist_id: number; artist_mbid: string }
 			| undefined;
 		if (related) {
@@ -376,8 +395,7 @@ async function scenarioB(item: ListItemRow, list: ListRow): Promise<void> {
 			const tracks = await getTracks(lidarrArtistId);
 			let target = tracks.find((t) => t.foreignTrackId === item.mbid);
 			if (!target) {
-				const titleLower = item.title.toLowerCase();
-				target = tracks.find((t) => t.title.toLowerCase() === titleLower);
+				target = tracks.find((t) => normalizeTitle(t.title) === normalizeTitle(item.title));
 			}
 
 			if (target) {
@@ -412,8 +430,7 @@ async function scenarioB(item: ListItemRow, list: ListRow): Promise<void> {
 	let target = tracks.find((t) => t.foreignTrackId === item.mbid);
 
 	if (!target) {
-		const titleLower = item.title.toLowerCase();
-		target = tracks.find((t) => t.title.toLowerCase() === titleLower);
+		target = tracks.find((t) => normalizeTitle(t.title) === normalizeTitle(item.title));
 	}
 
 	if (!target) {
@@ -469,16 +486,17 @@ async function scenarioC(item: ListItemRow, list: ListRow): Promise<void> {
 	}
 
 	if (!lidarrArtistId) {
-		// Fallback: sibling list_items with same artist_name
+		// Fallback: sibling list_items for the same MusicBrainz artist.
+		// Join on artist_mbid (immutable) rather than lidarr_artist_id.
 		const related = db
 			.prepare(
 				`SELECT li.lidarr_artist_id, ao.artist_mbid
            FROM list_items li
-           JOIN artist_ownership ao ON ao.lidarr_artist_id = li.lidarr_artist_id
-           WHERE li.artist_name = ? AND li.lidarr_artist_id IS NOT NULL
+           JOIN artist_ownership ao ON ao.artist_mbid = li.artist_mbid
+           WHERE li.artist_mbid = ? AND li.artist_mbid IS NOT NULL AND li.lidarr_artist_id IS NOT NULL
            LIMIT 1`
 			)
-			.get(item.artist_name) as
+			.get(item.artist_mbid) as
 			| { lidarr_artist_id: number; artist_mbid: string }
 			| undefined;
 		if (related) {

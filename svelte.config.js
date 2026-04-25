@@ -9,7 +9,11 @@ const config = {
       out: 'build'
     }),
     csrf: {
-      checkOrigin: false
+      // List trusted origins for CSRF protection. Empty array = strict same-origin.
+      // Add your reverse-proxy origin here if form actions break, e.g.:
+      //   trustedOrigins: ['https://tunefetch.example.com']
+      // For local dev add 'http://localhost:5173'.
+      trustedOrigins: []
     }
   }
 };

@@ -56,7 +56,7 @@ if (!building) {
 type CookieSecureMode = 'auto' | 'true' | 'false';
 
 interface Env {
-  /** Secret used for signing session cookies. Must be >= 32 chars. */
+  /** Secret used for signing session cookies and encrypting Plex tokens. Must be >= 32 chars. */
   SECRET: string;
   /** Directory where the SQLite DB and any persistent app files live. */
   DATA_DIR: string;
@@ -76,6 +76,12 @@ interface Env {
    * drop the session cookie and makes login appear to loop.
    */
   COOKIE_SECURE: CookieSecureMode;
+  /**
+   * Optional shared secret for the Lidarr webhook endpoint.
+   * When set, Lidarr must send this value in the `X-TuneFetch-Secret` header.
+   * Configure the matching header in Lidarr under Settings -> Connect -> Webhook.
+   */
+  LIDARR_WEBHOOK_SECRET: string | null;
 }
 
 function parseCookieSecure(raw: string | undefined): CookieSecureMode {
@@ -93,7 +99,8 @@ function load(): Env {
       DATA_DIR: '/app/data',
       ADMIN_USER: null,
       ADMIN_PASSWORD: null,
-      COOKIE_SECURE: 'auto'
+      COOKIE_SECURE: 'auto',
+      LIDARR_WEBHOOK_SECRET: null
     };
   }
 
@@ -115,7 +122,8 @@ function load(): Env {
     DATA_DIR: process.env.TUNEFETCH_DATA_DIR ?? '/app/data',
     ADMIN_USER: process.env.TUNEFETCH_ADMIN_USER ?? null,
     ADMIN_PASSWORD: process.env.TUNEFETCH_ADMIN_PASSWORD ?? null,
-    COOKIE_SECURE: parseCookieSecure(process.env.TUNEFETCH_COOKIE_SECURE)
+    COOKIE_SECURE: parseCookieSecure(process.env.TUNEFETCH_COOKIE_SECURE),
+    LIDARR_WEBHOOK_SECRET: process.env.LIDARR_WEBHOOK_SECRET ?? null
   };
 }
 

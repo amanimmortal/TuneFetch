@@ -50,7 +50,7 @@ async function walkDir(
  * Run the orphan detection scan.
  *
  * Scans all root folders that TuneFetch has used as mirror destinations
- * (i.e. folders that appear in mirror_files rows via their list_item → list
+ * (i.e. folders that appear in mirror_files rows via their list_item -> list
  * join). Any file found under those folders that has no matching
  * mirror_files.mirror_path record is recorded in orphan_files.
  *
@@ -63,7 +63,7 @@ export async function runOrphanScan(): Promise<void> {
   console.log('[scheduler] Starting orphan scan...');
 
   // Find root folders that TuneFetch actively uses as mirror destinations.
-  // Join through list_items → lists to get the root_folder_path.
+  // Join through list_items -> lists to get the root_folder_path.
   const secondaryRoots = db
     .prepare(
       `SELECT DISTINCT l.root_folder_path
@@ -114,6 +114,12 @@ const DEFAULT_SCAN_TIME = '03:00';
  * Calculate milliseconds until the next occurrence of HH:MM (24-hour, local time).
  * Always returns a positive value — if the time has already passed today,
  * returns the time until tomorrow.
+ *
+ * DST guard: setHours() can produce a zero or negative delta during the
+ * spring-forward hour (the clock jumps over the target time). In that case
+ * we fall back to a 24-hour interval so the scan is not skipped entirely.
+ * On the autumn fall-back, setHours() prefers the first occurrence, which
+ * is the correct behaviour (the scan runs once, at the expected wall time).
  */
 function msUntilNextRun(timeStr: string): number {
   const parts = timeStr.split(':');
@@ -131,7 +137,11 @@ function msUntilNextRun(timeStr: string): number {
   if (next.getTime() <= now.getTime()) {
     next.setDate(next.getDate() + 1);
   }
-  return next.getTime() - now.getTime();
+
+  const ms = next.getTime() - now.getTime();
+  // DST spring-forward safety: if ms is still non-positive after the date
+  // advance, fall back to exactly 24 hours so we never schedule in the past.
+  return ms > 0 ? ms : 24 * 60 * 60 * 1000;
 }
 
 // ── Session cleanup ───────────────────────────────────────────────────────────
@@ -158,7 +168,7 @@ function startSessionCleanup(): void {
  *
  * Also logs a reminder about the webhook configuration, since a missing
  * webhook registration means mirror_pending items will never resolve
- * (Risk §8 item 2).
+ * (Risk section 8 item 2).
  */
 async function checkLidarrOnStartup(): Promise<void> {
   try {
@@ -166,7 +176,7 @@ async function checkLidarrOnStartup(): Promise<void> {
     console.log(`[startup] Lidarr reachable — version ${status.version}`);
     console.log(
       '[startup] Reminder: ensure the Lidarr webhook is configured under ' +
-        'Settings → Connect → Webhook with events: On Download, On Upgrade.'
+        'Settings -> Connect -> Webhook with events: On Download, On Upgrade.'
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

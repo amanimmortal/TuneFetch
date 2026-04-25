@@ -2,6 +2,7 @@ import { hash, verify } from '@node-rs/argon2';
 import { randomBytes } from 'node:crypto';
 import { getDb } from './db';
 import { env } from './env';
+import { signSessionId, verifySessionCookie } from './crypto';
 
 export const SESSION_COOKIE = 'tf_session';
 export const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 30; // 30 days
@@ -83,41 +84,59 @@ export async function maybeSeedAdmin(): Promise<void> {
   await createUser(env.ADMIN_USER, env.ADMIN_PASSWORD);
 }
 
-/** Create a new session for the given user and return its id. */
+/**
+ * Create a new session for the given user.
+ *
+ * Returns `id` — the signed cookie value (`rawId:hmac`) to store in the browser.
+ * Only the rawId is persisted in the DB; the HMAC lives only in the cookie.
+ * Rotating TUNEFETCH_SECRET invalidates all outstanding sessions because
+ * verifySessionCookie() will reject the old HMACs.
+ */
 export function createSession(userId: number): { id: string; expiresAt: Date } {
-  const id = randomBytes(32).toString('hex');
+  const rawId = randomBytes(32).toString('hex');
   const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
   getDb()
     .prepare(
       'INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)'
     )
-    .run(id, userId, expiresAt.toISOString());
-  return { id, expiresAt };
+    .run(rawId, userId, expiresAt.toISOString());
+  return { id: signSessionId(rawId), expiresAt };
 }
 
 /**
- * Resolve a session cookie to a user record. Returns null if the
- * session is unknown or expired. Expired sessions are deleted on
- * read.
+ * Resolve a signed session cookie value to a user record.
+ * Returns null if the HMAC is invalid, the session is unknown, or it is expired.
+ * Expired sessions are deleted on read.
  */
 export function getSessionUser(
-  sessionId: string | null | undefined
+  cookieValue: string | null | undefined
 ): { id: number; username: string } | null {
-  if (!sessionId) return null;
+  if (!cookieValue) return null;
+  // Verify HMAC before hitting the DB to prevent timing attacks on invalid cookies.
+  const rawId = verifySessionCookie(cookieValue);
+  if (!rawId) return null;
+
   const row = getDb()
     .prepare('SELECT id, user_id, expires_at FROM sessions WHERE id = ?')
-    .get(sessionId) as SessionRow | undefined;
+    .get(rawId) as SessionRow | undefined;
   if (!row) return null;
 
   if (new Date(row.expires_at).getTime() < Date.now()) {
-    deleteSession(sessionId);
+    deleteSession(rawId);
     return null;
   }
   return getUserById(row.user_id);
 }
 
-export function deleteSession(sessionId: string): void {
-  getDb().prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
+/**
+ * Delete a session by its signed cookie value or raw ID.
+ * Accepts either format so logout works regardless of whether the cookie
+ * has been updated to the HMAC-signed form.
+ */
+export function deleteSession(cookieValueOrRawId: string): void {
+  // If it looks like a signed value, extract the rawId; otherwise use as-is.
+  const rawId = verifySessionCookie(cookieValueOrRawId) ?? cookieValueOrRawId;
+  getDb().prepare('DELETE FROM sessions WHERE id = ?').run(rawId);
 }
 
 /** Remove any sessions past their expiry. Safe to call periodically. */

@@ -11,7 +11,10 @@ import { startScheduler } from '$lib/server/scheduler';
 import { registerShutdownHandlers } from '$lib/server/shutdown';
 
 // Paths that are accessible without authentication.
-const PUBLIC_PREFIXES = ['/login', '/setup', '/api/webhook/'];
+// PUBLIC_PREFIXES matches any path that starts with the given prefix.
+// PUBLIC_EXACT matches only the exact path listed.
+const PUBLIC_PREFIXES = ['/login', '/setup'];
+const PUBLIC_EXACT = new Set(['/api/webhook/lidarr']);
 
 let _seeded = false;
 async function ensureSeed() {
@@ -26,7 +29,10 @@ async function ensureSeed() {
 }
 
 function isPublic(pathname: string): boolean {
-  return PUBLIC_PREFIXES.some((p) => pathname === p || pathname.startsWith(p));
+  return (
+    PUBLIC_EXACT.has(pathname) ||
+    PUBLIC_PREFIXES.some((p) => pathname === p || pathname.startsWith(p))
+  );
 }
 
 export const handle: Handle = async ({ event, resolve }) => {
@@ -37,31 +43,7 @@ export const handle: Handle = async ({ event, resolve }) => {
   event.locals.user = getSessionUser(sessionId);
 
   const { pathname } = event.url;
-  const isQuiet = pathname.startsWith('/@') || pathname.startsWith('/node_modules');
 
-  // ── DEBUG: inbound request state (cookie + resolved user) ─────────────────
-  // Remove once the login-loop issue is fully diagnosed.
-  const rawCookieHdr = event.request.headers.get('cookie') ?? '';
-  const hasSessionCookieHdr = rawCookieHdr.includes(`${SESSION_COOKIE}=`);
-  if (!isQuiet) {
-    console.log(
-      JSON.stringify({
-        ts: new Date().toISOString(),
-        tag: 'hooks.in',
-        method: event.request.method,
-        path: pathname,
-        search: event.url.search,
-        proto: event.url.protocol,
-        host: event.request.headers.get('host'),
-        xfProto: event.request.headers.get('x-forwarded-proto'),
-        hasSessionCookieHdr,
-        sessionIdPresent: Boolean(sessionId),
-        userResolved: event.locals.user?.username ?? null
-      })
-    );
-  }
-
-  const t0 = Date.now();
   try {
     // If no admin user has been configured yet, force the user through
     // a first-run setup flow.
@@ -74,46 +56,8 @@ export const handle: Handle = async ({ event, resolve }) => {
       redirect(303, `/login?redirect=${target}`);
     }
 
-    const response = await resolve(event);
-    const ms = Date.now() - t0;
-    if (!isQuiet) {
-      const setCookieHdr = response.headers.get('set-cookie');
-      console.log(
-        JSON.stringify({
-          ts: new Date().toISOString(),
-          tag: 'hooks.out',
-          method: event.request.method,
-          path: pathname,
-          status: response.status,
-          ms,
-          setCookie: setCookieHdr ? setCookieHdr.slice(0, 240) : null
-        })
-      );
-    }
-    return response;
+    return await resolve(event);
   } catch (e) {
-    // Log redirects thrown from this handle (they bypass resolve() above
-    // so would otherwise be invisible in the docker log stream).
-    const ms = Date.now() - t0;
-    if (
-      e &&
-      typeof e === 'object' &&
-      'status' in e &&
-      'location' in e &&
-      !isQuiet
-    ) {
-      console.log(
-        JSON.stringify({
-          ts: new Date().toISOString(),
-          tag: 'hooks.redirectThrow',
-          method: event.request.method,
-          path: pathname,
-          status: (e as { status: number }).status,
-          location: (e as { location: string }).location,
-          ms
-        })
-      );
-    }
     throw e;
   }
 };

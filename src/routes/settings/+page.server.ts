@@ -2,7 +2,7 @@ import { fail } from '@sveltejs/kit';
 import type { Actions, PageServerLoad } from './$types';
 import { SETTING_KEYS, getAllSettings, setSetting } from '$lib/server/settings';
 import { systemStatus, LidarrError } from '$lib/server/lidarr';
-import { testConnection as testPlexConnection, PlexError } from '$lib/server/plex';
+import { testConnection as testPlexConnection, PlexError, resetPlexCache } from '$lib/server/plex';
 
 // ── Shared result shape ───────────────────────────────────────────────────────
 
@@ -91,15 +91,22 @@ export const actions: Actions = {
 		const plexUrl = ((data.get('plex_url') as string | null) ?? '').trim();
 		const plexAdminToken = ((data.get('plex_admin_token') as string | null) ?? '').trim();
 
-		// Validate orphan scan time format
-		if (!/^\d{2}:\d{2}$/.test(orphanScanTime)) {
-			return fail(400, {
-				error: 'Orphan scan time must be in HH:MM format.',
-				connectionStatus: null as ConnectionStatus | null,
-				connectionMessage: null as string | null,
-				plexConnectionStatus: null as ConnectionStatus | null,
-				plexConnectionMessage: null as string | null
-			});
+		// Validate orphan scan time: must be HH:MM with 0-23 hours and 0-59 minutes.
+		// The simple regex ^\d{2}:\d{2}$ accepts invalid values like 99:99 or 25:00
+		// which cause setHours() to silently roll over by days.
+		{
+			const m = /^(\d{2}):(\d{2})$/.exec(orphanScanTime);
+			const hh = m ? Number(m[1]) : -1;
+			const mm = m ? Number(m[2]) : -1;
+			if (!m || hh < 0 || hh > 23 || mm < 0 || mm > 59) {
+				return fail(400, {
+					error: 'Orphan scan time must be HH:MM (00:00-23:59).',
+					connectionStatus: null as ConnectionStatus | null,
+					connectionMessage: null as string | null,
+					plexConnectionStatus: null as ConnectionStatus | null,
+					plexConnectionMessage: null as string | null
+				});
+			}
 		}
 
 		setSetting(SETTING_KEYS.LIDARR_URL, lidarrUrl);
@@ -108,6 +115,9 @@ export const actions: Actions = {
 		setSetting(SETTING_KEYS.ORPHAN_SCAN_TIME, orphanScanTime);
 		setSetting(SETTING_KEYS.PLEX_URL, plexUrl);
 		setSetting(SETTING_KEYS.PLEX_ADMIN_TOKEN, plexAdminToken);
+
+		// Reset the Plex machine-ID cache so the next Plex call fetches from the new URL.
+		resetPlexCache();
 
 		// Test Lidarr connection
 		const connection =

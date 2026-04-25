@@ -8,7 +8,7 @@ import { orchestrate } from '$lib/server/orchestrator';
  * Body (JSON): { "item_id": <list_items.id> }
  *
  * Re-runs the orchestrator for a specific failed/broken list_item.
- * Returns immediately — orchestration runs in the background.
+ * Returns immediately -- orchestration runs in the background.
  */
 export const POST: RequestHandler = async ({ request, params }) => {
 	const listId = Number(params.id);
@@ -25,8 +25,22 @@ export const POST: RequestHandler = async ({ request, params }) => {
 
 	if (!item) error(404, 'Item not found in this list');
 
-	orchestrate(itemId).catch((err) => {
-		console.error(`[retry] unhandled error for item ${itemId}:`, err);
+	queueMicrotask(() => {
+		orchestrate(itemId).catch((err) => {
+			console.error(`[retry] unhandled error for item ${itemId}:`, err);
+			// Update sync_status so the UI reflects the failure rather than
+			// staying stuck in whatever state it was in before the retry.
+			try {
+				getDb()
+					.prepare(
+						`UPDATE list_items SET sync_status = 'failed', sync_error = ?
+						   WHERE id = ?`
+					)
+					.run(String(err?.message ?? err), itemId);
+			} catch (dbErr) {
+				console.error(`[retry] Could not mark item ${itemId} as failed:`, dbErr);
+			}
+		});
 	});
 
 	return json({ queued: true, itemId });
