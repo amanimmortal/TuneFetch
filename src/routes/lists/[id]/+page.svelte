@@ -24,8 +24,22 @@
     track:  'Track'
   };
 
-  // Track which items are currently being retried
+  // Track which items are currently being retried or removed
   let retrying = new Set<number>();
+  let removing = new Set<number>();
+
+  async function removeItem(itemId: number) {
+    if (!confirm('Remove this item from the list? Mirror files on disk will also be deleted.')) return;
+    removing.add(itemId);
+    removing = removing;
+    try {
+      await fetch(`/api/lists/${data.list.id}/items/${itemId}`, { method: 'DELETE' });
+      await invalidateAll();
+    } finally {
+      removing.delete(itemId);
+      removing = removing;
+    }
+  }
 
   const RETRYABLE = new Set(['pending', 'mirror_pending', 'failed', 'mirror_broken']);
 
@@ -371,6 +385,14 @@
                   {retrying.has(item.id) ? 'Retrying…' : 'Retry'}
                 </button>
               {/if}
+              <button
+                class="text-xs py-1 px-2 rounded text-slate-500 hover:text-red-400 hover:bg-red-950/40 transition-colors disabled:opacity-30"
+                disabled={removing.has(item.id)}
+                on:click={() => removeItem(item.id)}
+                title="Remove from list"
+              >
+                {removing.has(item.id) ? '…' : '✕'}
+              </button>
             </div>
           </div>
 
