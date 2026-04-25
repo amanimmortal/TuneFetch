@@ -367,10 +367,35 @@ async function scenarioB(item: ListItemRow, list: ListRow): Promise<void> {
 			.prepare('SELECT * FROM artist_ownership WHERE artist_mbid = ?')
 			.get(resolvedArtistMbid) as OwnershipRow | undefined;
 		if (ownership && ownership.root_folder_path !== list.root_folder_path) {
-			db.prepare(`UPDATE list_items SET lidarr_artist_id = ? WHERE id = ?`).run(
-				lidarrArtistId,
-				item.id
-			);
+			// Cross-library mirror path.
+			// We still need to find the track, monitor its parent album, and trigger a
+			// search so Lidarr actually downloads it. Without this the file never arrives,
+			// the webhook never fires, and the item sits mirror_pending forever.
+			// We also need lidarr_album_id + lidarr_track_id stored before startBackfill
+			// so the backfill can scope correctly to just this track's file.
+			const tracks = await getTracks(lidarrArtistId);
+			let target = tracks.find((t) => t.foreignTrackId === item.mbid);
+			if (!target) {
+				const titleLower = item.title.toLowerCase();
+				target = tracks.find((t) => t.title.toLowerCase() === titleLower);
+			}
+
+			if (target) {
+				const album = await getAlbum(target.albumId);
+				if (!album.monitored) {
+					await updateAlbum({ ...album, monitored: true });
+				}
+				await runCommand('AlbumSearch', { albumIds: [target.albumId] });
+				db.prepare(
+					`UPDATE list_items SET lidarr_artist_id = ?, lidarr_album_id = ?, lidarr_track_id = ? WHERE id = ?`
+				).run(lidarrArtistId, target.albumId, target.id, item.id);
+			} else {
+				db.prepare(`UPDATE list_items SET lidarr_artist_id = ? WHERE id = ?`).run(
+					lidarrArtistId,
+					item.id
+				);
+			}
+
 			markMirrorPending(item.id);
 			startBackfill(lidarrArtistId, item.id, ownership.root_folder_path, list.root_folder_path).catch(
 				(err) => console.error(`[orchestrator] backfill failed for item ${item.id}:`, err)
@@ -502,10 +527,28 @@ async function scenarioC(item: ListItemRow, list: ListRow): Promise<void> {
 			.prepare('SELECT * FROM artist_ownership WHERE artist_mbid = ?')
 			.get(resolvedArtistMbid) as OwnershipRow | undefined;
 		if (ownership && ownership.root_folder_path !== list.root_folder_path) {
-			db.prepare(`UPDATE list_items SET lidarr_artist_id = ? WHERE id = ?`).run(
-				lidarrArtistId,
-				item.id
-			);
+			// Cross-library mirror path.
+			// Monitor the album and trigger a search so Lidarr downloads it.
+			// Also store lidarr_album_id before startBackfill so the backfill
+			// can scope correctly to just this album's files.
+			const albums = await getAlbums(lidarrArtistId);
+			const target = albums.find((a) => a.foreignAlbumId === item.mbid);
+
+			if (target) {
+				if (!target.monitored) {
+					await updateAlbum({ ...target, monitored: true });
+				}
+				await runCommand('AlbumSearch', { albumIds: [target.id] });
+				db.prepare(
+					`UPDATE list_items SET lidarr_artist_id = ?, lidarr_album_id = ? WHERE id = ?`
+				).run(lidarrArtistId, target.id, item.id);
+			} else {
+				db.prepare(`UPDATE list_items SET lidarr_artist_id = ? WHERE id = ?`).run(
+					lidarrArtistId,
+					item.id
+				);
+			}
+
 			markMirrorPending(item.id);
 			startBackfill(lidarrArtistId, item.id, ownership.root_folder_path, list.root_folder_path).catch(
 				(err) => console.error(`[orchestrator] backfill failed for item ${item.id}:`, err)
