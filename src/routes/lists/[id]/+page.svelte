@@ -27,6 +27,8 @@
   // Track which items are currently being retried
   let retrying = new Set<number>();
 
+  const RETRYABLE = new Set(['pending', 'mirror_pending', 'failed', 'mirror_broken']);
+
   async function retryItem(itemId: number) {
     retrying.add(itemId);
     retrying = retrying; // trigger reactivity
@@ -42,6 +44,16 @@
       retrying = retrying;
     }
   }
+
+  async function retryAll() {
+    const ids = data.items
+      .filter((i) => RETRYABLE.has(i.sync_status))
+      .map((i) => i.id);
+    await Promise.all(ids.map(retryItem));
+  }
+
+  $: retryableItems = data.items.filter((i) => RETRYABLE.has(i.sync_status));
+  $: retryingAll = retryableItems.length > 0 && retryableItems.every((i) => retrying.has(i.id));
 
   // ── Plex sync UI state ────────────────────────────────────────────────
   let showAddPlex = false;
@@ -315,6 +327,17 @@
       No items in this list yet. Search for music and add it here.
     </div>
   {:else}
+    {#if retryableItems.length > 0}
+      <div class="flex justify-end">
+        <button
+          class="btn-secondary text-xs py-1 px-3 disabled:opacity-50"
+          disabled={retryingAll}
+          on:click={retryAll}
+        >
+          {retryingAll ? 'Retrying…' : `Retry all (${retryableItems.length})`}
+        </button>
+      </div>
+    {/if}
     <div class="space-y-3">
       {#each data.items as item (item.id)}
         {@const cfg = statusCfg(item.sync_status)}
@@ -339,7 +362,7 @@
             <div class="flex shrink-0 items-center gap-2">
               <span class="badge {cfg.classes}">{cfg.label}</span>
 
-              {#if item.sync_status === 'failed' || item.sync_status === 'mirror_broken'}
+              {#if item.sync_status === 'failed' || item.sync_status === 'mirror_broken' || item.sync_status === 'pending' || item.sync_status === 'mirror_pending'}
                 <button
                   class="btn-secondary text-xs py-1 px-2 disabled:opacity-50"
                   disabled={retrying.has(item.id)}
