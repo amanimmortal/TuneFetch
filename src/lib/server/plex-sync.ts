@@ -82,8 +82,13 @@ export async function syncListToPlexPlaylist(
 	const db = getDb();
 
 	const row = db
-		.prepare('SELECT * FROM plex_playlists WHERE id = ?')
-		.get(plexPlaylistDbId) as PlexPlaylistRow | undefined;
+		.prepare(`
+			SELECT pp.*, l.root_folder_path AS list_root_folder_path
+			FROM plex_playlists pp
+			JOIN lists l ON l.id = pp.list_id
+			WHERE pp.id = ?
+		`)
+		.get(plexPlaylistDbId) as (PlexPlaylistRow & { list_root_folder_path: string }) | undefined;
 
 	if (!row) {
 		throw new Error(`plex_playlists row ${plexPlaylistDbId} not found`);
@@ -92,11 +97,11 @@ export async function syncListToPlexPlaylist(
 	// Decrypt the stored token -- it may be plaintext (legacy) or encrypted.
 	const plexToken = resolveToken(row.plex_user_token);
 
-	// Look up the library_section_id from the user mapping (matched by user name,
-	// since tokens are now encrypted with per-row random IVs and cannot be compared).
+	// Look up the library_section_id via root_folder_path (unique key on plex_user_mappings),
+	// not plex_user_name which is not unique and could return the wrong mapping row.
 	const userMapping = db
-		.prepare('SELECT library_section_id FROM plex_user_mappings WHERE plex_user_name = ?')
-		.get(row.plex_user_name) as { library_section_id: string } | undefined;
+		.prepare('SELECT library_section_id FROM plex_user_mappings WHERE root_folder_path = ?')
+		.get(row.list_root_folder_path) as { library_section_id: string } | undefined;
 
 	const librarySectionId = userMapping?.library_section_id ?? '';
 	if (!librarySectionId) {
@@ -369,9 +374,17 @@ export function getSectionIdsForArtist(lidarrArtistId: number): string[] {
 			`SELECT DISTINCT m.library_section_id
        FROM plex_playlists pp
        JOIN list_items li ON li.list_id = pp.list_id
-       JOIN plex_user_mappings m ON m.plex_user_name = pp.plex_user_name
+       JOIN lists l ON l.id = pp.list_id
+       JOIN plex_user_mappings m ON m.root_folder_path = l.root_folder_path
        WHERE li.lidarr_artist_id = ?
          AND li.sync_status IN ('synced', 'mirror_pending', 'mirror_active')
+         AND m.library_section_id != ''`
+		)
+		.all(lidarrArtistId) as Array<{ library_section_id: string }>;
+
+	return rows.map((r) => r.library_section_id);
+}
+('synced', 'mirror_pending', 'mirror_active')
          AND m.library_section_id != ''`
 		)
 		.all(lidarrArtistId) as Array<{ library_section_id: string }>;

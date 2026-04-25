@@ -14,7 +14,7 @@ import { syncListToPlexPlaylist } from '$lib/server/plex-sync';
 import { getDb } from '$lib/server/db';
 import { encrypt } from '$lib/server/crypto';
 
-// ── GET /api/plex?action=... ──────────────────────────────────────────────────
+// GET /api/plex?action=...
 
 export const GET: RequestHandler = async ({ url, fetch: svelteKitFetch }) => {
 	const action = url.searchParams.get('action');
@@ -81,7 +81,7 @@ export const GET: RequestHandler = async ({ url, fetch: svelteKitFetch }) => {
 	}
 };
 
-// ── POST /api/plex ────────────────────────────────────────────────────────────
+// POST /api/plex
 
 export const POST: RequestHandler = async ({ request, fetch: svelteKitFetch }) => {
 	const body = await request.json();
@@ -91,7 +91,7 @@ export const POST: RequestHandler = async ({ request, fetch: svelteKitFetch }) =
 
 	try {
 		switch (action) {
-			// ── Save user mapping ───────────────────────────────────────────────
+			// Save user mapping
 			case 'save_mapping': {
 				const { root_folder_path, plex_user_name, plex_user_token, library_section_id } = body;
 				if (!root_folder_path || !plex_user_name || !plex_user_token) {
@@ -108,7 +108,7 @@ export const POST: RequestHandler = async ({ request, fetch: svelteKitFetch }) =
 				return json({ ok: true });
 			}
 
-			// ── Delete user mapping ─────────────────────────────────────────────
+			// Delete user mapping
 			case 'delete_mapping': {
 				const { id } = body;
 				if (!id) throw error(400, 'id is required');
@@ -116,22 +116,29 @@ export const POST: RequestHandler = async ({ request, fetch: svelteKitFetch }) =
 				return json({ ok: true });
 			}
 
-			// ── Create a plex_playlists row (link a list to a Plex playlist) ──
+			// Create a plex_playlists row (link a list to a Plex playlist).
+			// Accepts mapping_id -- token is resolved server-side from plex_user_mappings
+			// to avoid sending the encrypted token through the client and double-encrypting it.
 			case 'create_playlist_link': {
-				const { list_id, plex_user_token, plex_user_name, playlist_title } = body;
-				if (!list_id || !plex_user_token || !plex_user_name || !playlist_title) {
-					throw error(400, 'list_id, plex_user_token, plex_user_name, and playlist_title are required');
+				const { list_id, mapping_id, playlist_title } = body;
+				if (!list_id || !mapping_id || !playlist_title) {
+					throw error(400, 'list_id, mapping_id, and playlist_title are required');
 				}
+				const mapping = db
+					.prepare('SELECT plex_user_token, plex_user_name FROM plex_user_mappings WHERE id = ?')
+					.get(mapping_id) as { plex_user_token: string; plex_user_name: string } | undefined;
+				if (!mapping) throw error(404, 'Plex user mapping not found');
+				// mapping.plex_user_token is already encrypted at rest -- store verbatim.
 				const result = db
 					.prepare(
 						`INSERT INTO plex_playlists (list_id, plex_user_token, plex_user_name, playlist_title)
 						 VALUES (?, ?, ?, ?)`
 					)
-					.run(list_id, encrypt(plex_user_token), plex_user_name, playlist_title);
+					.run(list_id, mapping.plex_user_token, mapping.plex_user_name, playlist_title);
 				return json({ ok: true, id: result.lastInsertRowid });
 			}
 
-			// ── Delete a plex_playlists row ────────────────────────────────────
+			// Delete a plex_playlists row
 			case 'delete_playlist_link': {
 				const { id: deleteId } = body;
 				if (!deleteId) throw error(400, 'id is required');
@@ -139,11 +146,10 @@ export const POST: RequestHandler = async ({ request, fetch: svelteKitFetch }) =
 				return json({ ok: true });
 			}
 
-			// ── Trigger manual sync ────────────────────────────────────────────
+			// Trigger manual sync
 			case 'sync': {
 				const { playlist_id } = body;
 				if (!playlist_id) throw error(400, 'playlist_id is required');
-
 				const syncResult = await syncListToPlexPlaylist(Number(playlist_id));
 				return json({ ok: true, result: syncResult });
 			}

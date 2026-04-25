@@ -102,8 +102,7 @@
         body: JSON.stringify({
           action: 'create_playlist_link',
           list_id: data.list.id,
-          plex_user_token: mapping.plex_user_token,
-          plex_user_name: mapping.plex_user_name,
+          mapping_id: Number(selectedMappingId),
           playlist_title: newPlaylistTitle.trim()
         })
       });
@@ -136,7 +135,13 @@
       const result = await res.json();
       if (result.ok) {
         const r = result.result;
-        plexSyncMessage = `Sync complete: ${r.added} added, ${r.alreadySynced} already synced, ${r.notFound} not found`;
+        const parts = [
+          `${r.added} added`,
+          `${r.alreadySynced} already synced`,
+          `${r.notFound} not found`,
+        ];
+        if (r.errors > 0) parts.push(`${r.errors} error${r.errors !== 1 ? 's' : ''}`);
+        plexSyncMessage = `Sync complete: ${parts.join(', ')}`;
         await invalidateAll();
       } else {
         plexSyncMessage = result.error ?? 'Sync failed';

@@ -3,7 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import schemaSql from './schema.sql?raw';
 import { env } from './env';
-import { encrypt, isEncrypted } from './crypto';
+import { encrypt, decrypt, isEncrypted } from './crypto';
 
 let _db: Database.Database | null = null;
 
@@ -13,7 +13,7 @@ let _db: Database.Database | null = null;
  * The database file lives under env.DATA_DIR (default `/app/data`).
  * On first call we create the directory if needed, open the DB,
  * enable WAL + foreign keys, and run the schema (all statements are
- * idempotent — `CREATE TABLE IF NOT EXISTS`).
+ * idempotent -- CREATE TABLE IF NOT EXISTS).
  */
 export function getDb(): Database.Database {
   if (_db) return _db;
@@ -26,9 +26,8 @@ export function getDb(): Database.Database {
   db.pragma('foreign_keys = ON');
   db.exec(schemaSql);
 
-  // ── Safe migrations ──────────────────────────────────────────────────────
-  // Add columns that were introduced after initial schema without breaking
-  // existing databases. SQLite does not support IF NOT EXISTS on ALTER TABLE.
+  // Safe migrations: add columns introduced after initial schema.
+  // SQLite does not support IF NOT EXISTS on ALTER TABLE.
   const listItemCols = (db.pragma('table_info(list_items)') as Array<{ name: string }>)
     .map((c) => c.name);
   if (!listItemCols.includes('artist_mbid')) {
@@ -44,16 +43,15 @@ export function getDb(): Database.Database {
     db.exec('ALTER TABLE lists ADD COLUMN metadata_profile_id INTEGER');
   }
 
-  // Migration: library_section_id moved from global settings to per-user mapping
+  // Migration: library_section_id moved from global settings to per-user mapping.
   const plexMappingCols = (db.pragma('table_info(plex_user_mappings)') as Array<{ name: string }>)
     .map((c) => c.name);
   if (!plexMappingCols.includes('library_section_id')) {
     db.exec("ALTER TABLE plex_user_mappings ADD COLUMN library_section_id TEXT NOT NULL DEFAULT ''");
   }
 
-  // ── Migrate artist_ownership: add ON DELETE SET NULL to owner_list_id FK ──
-  // SQLite does not support ALTER TABLE ... ALTER COLUMN, so we recreate the
-  // table if the FK is still NO ACTION (pre-P2-1 schema).
+  // Migrate artist_ownership: add ON DELETE SET NULL to owner_list_id FK.
+  // SQLite does not support ALTER TABLE ... ALTER COLUMN, so recreate if needed.
   {
     const fkList = db.prepare("PRAGMA foreign_key_list(artist_ownership)").all() as Array<{
       from: string; on_delete: string;
@@ -78,9 +76,7 @@ export function getDb(): Database.Database {
     }
   }
 
-  // ── Encrypt existing plaintext Plex tokens ───────────────────────────────
-  // If plex_user_mappings or plex_playlists have plaintext tokens (pre-P1-4),
-  // encrypt them now. Rows already starting with 'enc1:' are skipped.
+  // Encrypt existing plaintext Plex tokens (pre-P1-4 rows).
   const mappingRows = db
     .prepare('SELECT id, plex_user_token FROM plex_user_mappings')
     .all() as Array<{ id: number; plex_user_token: string }>;
@@ -98,6 +94,31 @@ export function getDb(): Database.Database {
     if (!isEncrypted(row.plex_user_token)) {
       db.prepare('UPDATE plex_playlists SET plex_user_token = ? WHERE id = ?')
         .run(encrypt(row.plex_user_token), row.id);
+    }
+  }
+
+  // Repair double-encrypted plex_playlists tokens.
+  // The old create_playlist_link path sent the already-encrypted mapping token
+  // through the client and then encrypted it again server-side. Peel one layer:
+  // if decrypting a token yields another enc1: string, write the inner value back.
+  // This is idempotent once all rows are correct.
+  {
+    const rows2 = db
+      .prepare('SELECT id, plex_user_token FROM plex_playlists')
+      .all() as Array<{ id: number; plex_user_token: string }>;
+    for (const r of rows2) {
+      if (!isEncrypted(r.plex_user_token)) continue;
+      let inner: string;
+      try {
+        inner = decrypt(r.plex_user_token);
+      } catch {
+        continue;
+      }
+      if (isEncrypted(inner)) {
+        db.prepare('UPDATE plex_playlists SET plex_user_token = ? WHERE id = ?')
+          .run(inner, r.id);
+        console.log(`[migration] Peeled double-encrypted token on plex_playlists row ${r.id}`);
+      }
     }
   }
 
