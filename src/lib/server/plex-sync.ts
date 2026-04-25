@@ -384,10 +384,3 @@ export function getSectionIdsForArtist(lidarrArtistId: number): string[] {
 
 	return rows.map((r) => r.library_section_id);
 }
-('synced', 'mirror_pending', 'mirror_active')
-         AND m.library_section_id != ''`
-		)
-		.all(lidarrArtistId) as Array<{ library_section_id: string }>;
-
-	return rows.map((r) => r.library_section_id);
-}
