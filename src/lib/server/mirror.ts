@@ -13,7 +13,7 @@
 import { promises as fs, constants as fsConstants } from 'node:fs';
 import { dirname, relative, join } from 'node:path';
 import { getDb } from './db';
-import { getTrackFiles } from './lidarr';
+import { getTrackFiles, getTracks, type LidarrTrackFile } from './lidarr';
 
 // ── Path helpers ──────────────────────────────────────────────────────────────
 
@@ -217,6 +217,8 @@ async function _runBackfill(
 ): Promise<void> {
   const db = getDb();
 
+  console.log(`[mirror] backfill start — listItem=${listItemId} lidarrArtist=${lidarrArtistId} target="${targetRoot}"`);
+
   db.prepare(
     `UPDATE list_items SET sync_status = 'mirror_active', sync_error = NULL WHERE id = ?`
   ).run(listItemId);
@@ -225,13 +227,59 @@ async function _runBackfill(
     // Fail fast with a human-readable message if the mount point isn't writable.
     await checkWritable(targetRoot);
 
-    const trackFiles = await getTrackFiles(lidarrArtistId);
+    // Determine the scope of this list_item so we only mirror the files it
+    // actually represents — not every file by the artist.
+    const listItem = db
+      .prepare('SELECT type, lidarr_album_id, lidarr_track_id FROM list_items WHERE id = ?')
+      .get(listItemId) as
+        | { type: 'artist' | 'album' | 'track'; lidarr_album_id: number | null; lidarr_track_id: number | null }
+        | undefined;
+
+    if (!listItem) {
+      throw new Error(`list_item ${listItemId} not found — cannot determine mirror scope`);
+    }
+
+    const allTrackFiles = await getTrackFiles(lidarrArtistId);
+
+    let trackFiles: LidarrTrackFile[];
+
+    if (listItem.type === 'artist') {
+      // Mirror everything downloaded for this artist.
+      trackFiles = allTrackFiles;
+    } else if (listItem.type === 'album') {
+      // Mirror only files belonging to the specific album.
+      trackFiles = allTrackFiles.filter((f) => f.albumId === listItem.lidarr_album_id);
+    } else {
+      // Mirror only the single track file.
+      // LidarrTrack carries a `trackFileId` field that links to the track file's
+      // numeric id — it is present in the Lidarr v1 API but not currently typed
+      // in our LidarrTrack interface, so we read it via the index signature.
+      if (listItem.lidarr_track_id !== null) {
+        const allTracks = await getTracks(lidarrArtistId);
+        const track = allTracks.find((t) => t.id === listItem.lidarr_track_id);
+        const trackFileId = track
+          ? (track as unknown as { trackFileId?: number }).trackFileId
+          : undefined;
+        trackFiles =
+          trackFileId !== undefined && trackFileId > 0
+            ? allTrackFiles.filter((f) => f.id === trackFileId)
+            : [];
+      } else {
+        trackFiles = [];
+      }
+    }
+
+    console.log(
+      `[mirror] backfill listItem=${listItemId} (${listItem.type}): ` +
+      `${trackFiles.length} of ${allTrackFiles.length} artist file(s) in scope`
+    );
 
     if (trackFiles.length === 0) {
       // No files on disk yet — stay mirror_pending; webhook will trigger copies later.
       db.prepare(
         `UPDATE list_items SET sync_status = 'mirror_pending' WHERE id = ?`
       ).run(listItemId);
+      console.log(`[mirror] backfill listItem=${listItemId}: no files on disk yet → mirror_pending`);
       return;
     }
 
@@ -243,7 +291,7 @@ async function _runBackfill(
         await mirrorTrackFile(file.path, listItemId, ownerRoot, targetRoot);
         successCount++;
       } catch (err) {
-        console.error(`[mirror] backfill: failed to copy ${file.path}:`, err);
+        console.error(`[mirror] backfill listItem=${listItemId}: failed to copy ${file.path}:`, err);
         errorCount++;
         // Record a pending mirror_files row so the failure is visible
         const mirrorPath = buildMirrorPath(file.path, ownerRoot, targetRoot);
@@ -262,23 +310,26 @@ async function _runBackfill(
     }
 
     if (successCount === 0) {
+      const msg = `All ${errorCount} file copies failed during backfill`;
       db.prepare(
         `UPDATE list_items SET sync_status = 'mirror_broken', sync_error = ? WHERE id = ?`
-      ).run(`All ${errorCount} file copies failed during backfill`, listItemId);
+      ).run(msg, listItemId);
+      console.error(`[mirror] backfill listItem=${listItemId}: ${msg}`);
     } else if (errorCount > 0) {
+      const msg = `Backfill partially failed: ${errorCount} of ${trackFiles.length} files could not be copied`;
       db.prepare(
         `UPDATE list_items SET sync_status = 'mirror_broken', sync_error = ? WHERE id = ?`
-      ).run(
-        `Backfill partially failed: ${errorCount} of ${trackFiles.length} files could not be copied`,
-        listItemId
-      );
+      ).run(msg, listItemId);
+      console.error(`[mirror] backfill listItem=${listItemId}: ${msg}`);
     } else {
       db.prepare(
         `UPDATE list_items SET sync_status = 'synced', sync_error = NULL WHERE id = ?`
       ).run(listItemId);
+      console.log(`[mirror] backfill listItem=${listItemId}: complete — ${successCount} file(s) copied → synced`);
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[mirror] backfill listItem=${listItemId}: fatal error —`, err);
     db.prepare(
       `UPDATE list_items SET sync_status = 'mirror_broken', sync_error = ? WHERE id = ?`
     ).run(msg, listItemId);
