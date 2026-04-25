@@ -40,6 +40,7 @@ WORKDIR /app
 COPY --from=builder /build/build ./build
 COPY --from=builder /build/node_modules ./node_modules
 COPY --from=builder /build/package.json ./package.json
+COPY --from=builder /build/scripts ./scripts
 
 # Schema lives inside build/ via the ?raw import, so no separate copy needed.
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh

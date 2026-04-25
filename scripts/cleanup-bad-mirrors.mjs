@@ -31,7 +31,7 @@ import { unlinkSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const isDryRun = process.argv.includes('--dry-run');
-const dataDir = process.env.DATA_DIR ?? '/app/data';
+const dataDir = process.env.TUNEFETCH_DATA_DIR ?? '/app/data';
 const dbPath = resolve(dataDir, 'tunefetch.db');
 
 console.log('─'.repeat(60));
