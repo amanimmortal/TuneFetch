@@ -573,12 +573,3 @@ async function getMachineId(fetchFn?: FetchFn): Promise<string> {
 export function resetPlexCache(): void {
 	_machineId = null;
 }
-
-/**
- * Reset the machine-ID cache.
- * Call this whenever PLEX_URL changes (e.g. from the settings save action)
- * so subsequent calls fetch the identifier from the new server.
- */
-export function resetPlexCache(): void {
-	_machineId = null;
-}
