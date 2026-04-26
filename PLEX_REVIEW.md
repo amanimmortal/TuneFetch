@@ -661,13 +661,35 @@ This is a structural problem: the token source is wrong. We need a token the **l
 
 **Result:** HTTP 404 for all four users (Ben, Guest, Kids, Sharna). The endpoint does not exist on this PMS version.
 
-### 10.6 Current diagnostic: GET /home/users on local PMS
+### 10.6 FAILED: GET /home/users on local PMS → 404
 
-**Hypothesis:** `GET {localPms}/home/users` with admin token might return home user records that include locally-valid tokens or identifiers we can use.
+Endpoint does not exist on this PMS version.
 
-**Change made (`plex.ts` — `getManagedUsers()`):** Added a diagnostic call to `GET {config.baseUrl}/home/users` that logs the first 1000 chars of the response. The plex.tv switch fallback is still in place so the Settings UI still populates. Nothing changes in visible behaviour — this is purely to see what the local PMS exposes.
+### 10.7 FAILED: local PMS endpoint variations
 
-**After deploy:** go to Settings → Plex → fetch users, then paste the `[plex] GET /home/users →` container log line. The response will determine next steps.
+Tried `POST /home/users/switch` (body id=), `POST /api/home/users/{id}/switch`, `POST /home/users/{id}` — all returned 404.
+
+### 10.8 Key discovery: Plex web app does a two-step auth exchange
+
+Captured the Plex web app's DevTools console when clicking the Kids profile. The sequence is:
+
+1. `switchUser` → `authenticateWithServer` → calls plex.tv switch → gets cloud token
+2. Tries `plex.tv/api/v2/resources` with cloud token → **fails** ("Failed to request resources through plex.tv")
+3. **`signIn`** is called — exchanges the cloud token for a full session token
+4. Servers found, websocket connects to local PMS (Tower) with a **new, different token**
+
+The raw cloud switch token is not the token the local PMS accepts. The Plex app calls `POST https://plex.tv/users/sign_in.json` with the cloud token in `X-Plex-Token`, which returns `{ user: { authToken: "..." } }`. That `authToken` is the locally-valid session token.
+
+TuneFetch was skipping this exchange step entirely.
+
+### 10.9 Current fix in progress: two-step token exchange in getFreshUserToken
+
+**Change made (`plex.ts` — `getFreshUserToken()`):**
+1. `POST plex.tv/api/home/users/{id}/switch` (admin token) → cloud token
+2. `POST plex.tv/users/sign_in.json` (cloud token in X-Plex-Token) → `user.authToken`
+3. Return `user.authToken` — this is the locally-valid session token
+
+**After deploy:** re-fetch users → re-save mapping → delete + recreate playlist link → Sync now. Logs should show `got session token for user {id}` and `createPlaylist` should succeed.
 
 ### 10.6 Current state of each file
 

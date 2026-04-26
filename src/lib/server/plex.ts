@@ -337,25 +337,42 @@ export async function getManagedUsers(
 	// are embedded in the home user list. Logs the full raw response so we can
 	// inspect the shape regardless of outcome.
 
-	// ── Step 2a: Diagnostic — log full GET /home/users from local PMS ────────
-	console.log('[plex] Fetching local PMS /home/users for diagnostic...');
-	try {
-		const localUsersResp = await fn(`${config.baseUrl}/home/users`, {
-			method: 'GET',
-			headers: {
-				'X-Plex-Token': config.adminToken,
-				'X-Plex-Client-Identifier': PLEX_CLIENT_ID,
-				'X-Plex-Product': PLEX_PRODUCT,
-				Accept: 'application/json'
-			},
-			signal: AbortSignal.timeout(15_000)
-		});
-		const localUsersText = await localUsersResp.text();
-		console.log(
-			`[plex] GET /home/users → HTTP ${localUsersResp.status}, body (first 1000): ${localUsersText.substring(0, 1000)}`
-		);
-	} catch (err) {
-		console.log(`[plex] GET /home/users error: ${describeFetchError(err)}`);
+	// ── Step 2a: Diagnostic — try local PMS managed user auth endpoints ─────
+	// All plex.tv switch tokens return 401 on the local PMS.
+	// Trying local PMS endpoint variations to find one that returns a local token.
+	{
+		const headers = {
+			'X-Plex-Token': config.adminToken,
+			'X-Plex-Client-Identifier': PLEX_CLIENT_ID,
+			'X-Plex-Product': PLEX_PRODUCT,
+			Accept: 'application/json'
+		};
+		// Try POST /home/users/switch with user ID in body (older Plex versions)
+		for (const userId of userList.map(u => u.id)) {
+			const user = userList.find(u => u.id === userId)!;
+			const variants = [
+				{ url: `${config.baseUrl}/home/users/switch`, method: 'POST', body: `id=${userId}` },
+				{ url: `${config.baseUrl}/api/home/users/${userId}/switch`, method: 'POST', body: undefined },
+				{ url: `${config.baseUrl}/home/users/${userId}`, method: 'POST', body: undefined },
+			];
+			for (const v of variants) {
+				try {
+					const resp = await fn(v.url, {
+						method: v.method,
+						headers: v.body
+							? { ...headers, 'Content-Type': 'application/x-www-form-urlencoded' }
+							: headers,
+						body: v.body,
+						signal: AbortSignal.timeout(8_000)
+					});
+					const text = await resp.text();
+					console.log(`[plex] ${v.method} ${v.url} (user ${user.title}) → HTTP ${resp.status}, body (first 200): ${text.substring(0, 200)}`);
+				} catch (err) {
+					console.log(`[plex] ${v.method} ${v.url} → error: ${describeFetchError(err)}`);
+				}
+			}
+			break; // Only test against first user — enough to see what works
+		}
 	}
 
 	// ── Step 2b: Fall back to plex.tv switch (known to return cloud tokens) ───
@@ -425,8 +442,9 @@ export async function getFreshUserToken(
 	const fn = fetchFn ?? fetch;
 
 	try {
+		// Step 1: Get the temporary cloud switch token for this managed user.
 		const switchUrl = `https://plex.tv/api/home/users/${plexUserId}/switch`;
-		const resp = await fn(switchUrl, {
+		const switchResp = await fn(switchUrl, {
 			method: 'POST',
 			headers: {
 				'X-Plex-Token': config.adminToken,
@@ -436,17 +454,56 @@ export async function getFreshUserToken(
 			signal: AbortSignal.timeout(15_000)
 		});
 
-		const text = await resp.text();
-		if (!resp.ok) {
-			console.error(`[plex] getFreshUserToken: plex.tv switch HTTP ${resp.status} for user ${plexUserId}`);
+		const switchText = await switchResp.text();
+		if (!switchResp.ok) {
+			console.error(`[plex] getFreshUserToken: switch HTTP ${switchResp.status} for user ${plexUserId}`);
 			return null;
 		}
 
-		const token = text.match(/authenticationToken="([^"]+)"/)?.[1] ?? null;
-		if (!token) {
-			console.error(`[plex] getFreshUserToken: no authenticationToken in switch response for user ${plexUserId}`);
+		const cloudToken = switchText.match(/authenticationToken="([^"]+)"/)?.[1];
+		if (!cloudToken) {
+			console.error(`[plex] getFreshUserToken: no authenticationToken in switch XML for user ${plexUserId}`);
+			return null;
 		}
-		return token;
+
+		// Step 2: Exchange the cloud switch token for a full session token via
+		// POST /users/sign_in.json. This is what the Plex web app does after
+		// switching users — the raw switch token is rejected by the local PMS,
+		// but the sign_in exchange returns a token that the local PMS accepts.
+		const signInResp = await fn('https://plex.tv/users/sign_in.json', {
+			method: 'POST',
+			headers: {
+				'X-Plex-Token': cloudToken,
+				'X-Plex-Client-Identifier': PLEX_CLIENT_ID,
+				'X-Plex-Product': PLEX_PRODUCT,
+				Accept: 'application/json'
+			},
+			signal: AbortSignal.timeout(15_000)
+		});
+
+		const signInText = await signInResp.text();
+		if (!signInResp.ok) {
+			console.error(`[plex] getFreshUserToken: sign_in HTTP ${signInResp.status} for user ${plexUserId}: ${signInText.substring(0, 200)}`);
+			return null;
+		}
+
+		// Response: { user: { authToken: "..." } }
+		let sessionToken: string | undefined;
+		try {
+			const json = JSON.parse(signInText);
+			sessionToken = json?.user?.authToken;
+		} catch {
+			// Try XML fallback
+			sessionToken = signInText.match(/authToken="([^"]+)"/)?.[1];
+		}
+
+		if (!sessionToken) {
+			console.error(`[plex] getFreshUserToken: no authToken in sign_in response for user ${plexUserId}. Body: ${signInText.substring(0, 300)}`);
+			return null;
+		}
+
+		console.log(`[plex] getFreshUserToken: got session token for user ${plexUserId} (length ${sessionToken.length})`);
+		return sessionToken;
 	} catch (err) {
 		console.error(`[plex] getFreshUserToken error for user ${plexUserId}: ${describeFetchError(err)}`);
 		return null;
