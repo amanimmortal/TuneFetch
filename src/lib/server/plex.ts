@@ -392,26 +392,23 @@ export async function searchTrack(
 	artistName: string,
 	trackTitle: string,
 	sectionId: string,
-	userToken: string,
 	fetchFn?: FetchFn
 ): Promise<PlexTrack | null> {
 	if (!sectionId) {
 		throw new PlexError('No Plex library section ID provided for this user mapping.');
 	}
-	if (!userToken) {
-		throw new PlexError('No Plex user token provided for searchTrack.');
-	}
 
 	// Search by track title within the music library section (type=10 = track).
-	// Authenticate with the user's own token in X-Plex-Token so the PMS returns
-	// ratingKeys from that user's library perspective — the correct Plex API pattern.
+	// Use the admin token — managed/family user tokens from the plex.tv switch endpoint
+	// are not accepted by the local PMS for library section searches.
+	// ratingKeys are library-wide and identical regardless of which user views them.
 	const searchQuery = encodeURIComponent(trackTitle);
 	const raw = await request<{
 		MediaContainer: { Metadata?: PlexTrack[] };
 	}>(
 		'GET',
 		`/library/sections/${sectionId}/search?type=10&query=${searchQuery}`,
-		{ token: userToken, fetchFn }
+		{ fetchFn }
 	);
 
 	const results = raw.MediaContainer.Metadata ?? [];
