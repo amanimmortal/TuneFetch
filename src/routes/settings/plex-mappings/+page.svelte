@@ -82,12 +82,14 @@
     }
   }
 
-  // When a Plex user is selected, populate name + token
+  // When a Plex user is selected, populate name, token, and numeric ID
+  let plexUserId: number | null = null;
   $: if (selectedPlexUserId && plexUsers.length > 0) {
     const user = plexUsers.find(u => u.id === Number(selectedPlexUserId));
     if (user) {
       userName = user.title;
       userToken = user.accessToken;
+      plexUserId = user.id;
     }
   }
 
@@ -113,6 +115,7 @@
           root_folder_path: selectedRootPath,
           plex_user_name: userName,
           plex_user_token: userToken,
+          plex_user_id: plexUserId,
           library_section_id: librarySectionId
         })
       });
@@ -122,6 +125,7 @@
         selectedRootPath = '';
         userName = '';
         userToken = '';
+        plexUserId = null;
         librarySectionId = '';
         selectedPlexUserId = '';
         selectedSectionKey = '';

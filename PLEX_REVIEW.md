@@ -655,21 +655,19 @@ After deploy, container logs showed:
 
 This is a structural problem: the token source is wrong. We need a token the **local PMS issued**, not one plex.tv issued.
 
-### 10.5 Current fix in progress: local PMS switch endpoint
+### 10.5 FAILED: local PMS switch endpoint → 404
 
-**Hypothesis:** The local PMS exposes its own `POST {baseUrl}/home/users/{id}/switch` endpoint. Calling it with the admin token should return a locally-issued token for the managed user that the local PMS accepts for all operations (search, playlist creation, playlist modification).
+**Hypothesis:** `POST {localPms}/home/users/{id}/switch` with admin token returns a locally-valid token.
 
-**Change made (`plex.ts` — `getManagedUsers()`):** Step 2 now calls `POST {config.baseUrl}/home/users/{id}/switch` with the admin token and `Accept: application/json`, instead of the plex.tv switch endpoint. Heavy logging is included to capture the exact response body if it fails.
+**Result:** HTTP 404 for all four users (Ben, Guest, Kids, Sharna). The endpoint does not exist on this PMS version.
 
-**After deploy, required user action:**
-1. Settings → Plex → re-fetch users (this runs the updated `getManagedUsers()`)
-2. Re-save the user mapping for the managed account (overwrites the old cloud token with the new local one)
-3. Delete the existing broken playlist link and recreate it
-4. Click Sync now and check container logs
+### 10.6 Current diagnostic: GET /home/users on local PMS
 
-**If this succeeds:** the token stored in `plex_user_mappings` will be a local-PMS-issued token, and both `searchTrack` (admin token) and `createPlaylist`/`addToPlaylist` (user token) should work.
+**Hypothesis:** `GET {localPms}/home/users` with admin token might return home user records that include locally-valid tokens or identifiers we can use.
 
-**If this fails:** container logs will show exactly what the local PMS returned. Next steps would depend on whether the endpoint exists, what format it returns, and whether it requires the managed user's PIN.
+**Change made (`plex.ts` — `getManagedUsers()`):** Added a diagnostic call to `GET {config.baseUrl}/home/users` that logs the first 1000 chars of the response. The plex.tv switch fallback is still in place so the Settings UI still populates. Nothing changes in visible behaviour — this is purely to see what the local PMS exposes.
+
+**After deploy:** go to Settings → Plex → fetch users, then paste the `[plex] GET /home/users →` container log line. The response will determine next steps.
 
 ### 10.6 Current state of each file
 

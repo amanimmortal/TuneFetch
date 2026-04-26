@@ -109,6 +109,8 @@ CREATE TABLE IF NOT EXISTS plex_user_mappings (
   root_folder_path      TEXT NOT NULL UNIQUE,
   plex_user_name        TEXT NOT NULL,
   plex_user_token       TEXT NOT NULL,
+  -- Numeric plex.tv home user ID — used to get a fresh switch token at sync time.
+  plex_user_id          INTEGER,
   -- The Plex music library section ID for this user.
   -- Each user/family group may have a separate music library in Plex.
   library_section_id    TEXT NOT NULL DEFAULT '',

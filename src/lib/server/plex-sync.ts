@@ -20,6 +20,7 @@ import {
 	createPlaylist,
 	addToPlaylist,
 	getPlaylistItems,
+	getFreshUserToken,
 	PlexError
 } from './plex';
 import { decrypt, isEncrypted } from './crypto';
@@ -39,6 +40,10 @@ interface PlexPlaylistRow {
 	plex_playlist_id: string | null;
 	playlist_title: string;
 	last_synced_at: string | null;
+}
+
+interface PlexUserMappingRow {
+	plex_user_id: number | null;
 }
 
 interface ListItemRow {
@@ -95,13 +100,29 @@ export async function syncListToPlexPlaylist(
 	}
 
 	// Decrypt the stored token -- it may be plaintext (legacy) or encrypted.
-	const plexToken = resolveToken(row.plex_user_token);
+	// This is the fallback; we try to get a fresh token from plex.tv below.
+	const storedToken = resolveToken(row.plex_user_token);
 
-	// Look up the library_section_id via root_folder_path (unique key on plex_user_mappings),
-	// not plex_user_name which is not unique and could return the wrong mapping row.
+	// Look up the library_section_id and plex_user_id via root_folder_path.
 	const userMapping = db
-		.prepare('SELECT library_section_id FROM plex_user_mappings WHERE root_folder_path = ?')
-		.get(row.list_root_folder_path) as { library_section_id: string } | undefined;
+		.prepare('SELECT library_section_id, plex_user_id FROM plex_user_mappings WHERE root_folder_path = ?')
+		.get(row.list_root_folder_path) as (PlexUserMappingRow & { library_section_id: string }) | undefined;
+
+	// Attempt to get a fresh switch token from plex.tv immediately before playlist
+	// operations. The switch token is short-lived; the stored DB token may be stale.
+	// Falls back to the stored token if the refresh fails.
+	let plexToken = storedToken;
+	if (userMapping?.plex_user_id) {
+		const fresh = await getFreshUserToken(userMapping.plex_user_id);
+		if (fresh) {
+			console.log(`[plex-sync] Got fresh token for user ID ${userMapping.plex_user_id}`);
+			plexToken = fresh;
+		} else {
+			console.warn(`[plex-sync] Could not get fresh token for user ID ${userMapping.plex_user_id}, using stored token`);
+		}
+	} else {
+		console.warn(`[plex-sync] No plex_user_id stored for this mapping — using stored token. Re-save the mapping in Settings to fix this.`);
+	}
 
 	const librarySectionId = userMapping?.library_section_id ?? '';
 	if (!librarySectionId) {

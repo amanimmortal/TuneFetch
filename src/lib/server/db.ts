@@ -49,6 +49,11 @@ export function getDb(): Database.Database {
   if (!plexMappingCols.includes('library_section_id')) {
     db.exec("ALTER TABLE plex_user_mappings ADD COLUMN library_section_id TEXT NOT NULL DEFAULT ''");
   }
+  // Migration: plex_user_id stores the numeric plex.tv home user ID so we can
+  // fetch a fresh switch token at sync time (switch tokens are short-lived).
+  if (!plexMappingCols.includes('plex_user_id')) {
+    db.exec('ALTER TABLE plex_user_mappings ADD COLUMN plex_user_id INTEGER');
+  }
 
   // Migrate artist_ownership: add ON DELETE SET NULL to owner_list_id FK.
   // SQLite does not support ALTER TABLE ... ALTER COLUMN, so recreate if needed.
