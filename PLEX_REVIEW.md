@@ -601,3 +601,87 @@ No code change required beyond §3 — this is just a note that the fix has wide
 3. **Plex API verification (§6.3):** confirmed `uri=server://{machineId}/com.plexapp.plugins.library/library/metadata/{rk1,rk2,...}` format for multi-track creation?
 4. **Diagnostic data:** can you run the SQL in §3.3 (or paste the lengths and prefixes of `plex_user_token` in `plex_playlists` vs `plex_user_mappings` for the same user)? That alone will confirm or refute the primary hypothesis without changing any code.
 5. **Permission to delete rows:** if §3.3 confirms double-encryption, are you OK with `DELETE FROM plex_playlists` to clear bad rows (you would re-add the playlist links after Fix B), or do you want me to write the targeted "peel one layer" migration from §3.5?
+
+---
+
+## 10. Implementation log — what has been tried (2026-04-26)
+
+This section records every change made and every runtime result observed, so future sessions don't repeat work.
+
+### 10.1 Changes implemented and deployed
+
+All five issues from §3–§6 were implemented and the Docker image was built and deployed successfully.
+
+| # | Section | File(s) changed | Status |
+|---|---|---|---|
+| 1 | §3 Fix B | `+page.svelte`, `+server.ts` | ✅ Implemented |
+| 2 | §4 | `+page.svelte` | ✅ Implemented |
+| 3 | §5 | `plex-sync.ts` | ✅ Implemented |
+| 4 | §6.1 (initial) | `plex.ts` | ✅ Implemented (then revised — see below) |
+| 5 | §3.5 migration | `db.ts` | ✅ Implemented |
+
+### 10.2 Runtime result after first deploy
+
+After deploy, container logs showed:
+
+```
+[plex-sync] Error searching Plex for "Artist - Title": PlexError: Plex returned HTTP 401
+```
+
+`searchTrack` was sending the managed user token (from `plex_user_mappings`) as `X-Plex-Token`. The local PMS returned 401 for every search.
+
+**Key fact established:** the account being synced is a **Plex Managed Family Account** — a PIN-based sub-account with no independent plex.tv credentials. The token stored in `plex_user_mappings` (obtained via `POST plex.tv/api/home/users/{id}/switch`) is a **plex.tv cloud session token**. The local PMS rejects it for library section search requests.
+
+### 10.3 Fix: revert `searchTrack` to admin token
+
+**Hypothesis:** ratingKeys are library-wide and identical regardless of which user performs the search. Use admin token for search; keep user token only for playlist creation.
+
+**Change made (`plex.ts`):** Removed `userToken` parameter from `searchTrack` entirely. The function now uses the admin token via `request()`'s fallback to `readConfig().adminToken`.
+
+**Change made (`plex-sync.ts`):** Removed the `plexToken` argument from the `searchTrack(...)` call.
+
+**Result after deploy:** `searchTrack` no longer 401s. But `createPlaylist` now 401s:
+
+```
+[plex-sync] Failed to create playlist: PlexError: Plex returned HTTP 401
+    at createPlaylist (plex-B_wpJuKl.js:223:15)
+```
+
+**Conclusion:** The plex.tv cloud switch token is rejected by the local PMS for **all** operations — not just search. It cannot be used as `X-Plex-Token` for any local PMS call.
+
+### 10.4 Root cause of the token problem
+
+`getManagedUsers()` calls `POST https://plex.tv/api/home/users/{id}/switch`. The `authenticationToken` this returns is a **plex.tv cloud credential**. The local PMS does not accept it because the local PMS authenticates tokens against its own session store, not plex.tv's.
+
+This is a structural problem: the token source is wrong. We need a token the **local PMS issued**, not one plex.tv issued.
+
+### 10.5 Current fix in progress: local PMS switch endpoint
+
+**Hypothesis:** The local PMS exposes its own `POST {baseUrl}/home/users/{id}/switch` endpoint. Calling it with the admin token should return a locally-issued token for the managed user that the local PMS accepts for all operations (search, playlist creation, playlist modification).
+
+**Change made (`plex.ts` — `getManagedUsers()`):** Step 2 now calls `POST {config.baseUrl}/home/users/{id}/switch` with the admin token and `Accept: application/json`, instead of the plex.tv switch endpoint. Heavy logging is included to capture the exact response body if it fails.
+
+**After deploy, required user action:**
+1. Settings → Plex → re-fetch users (this runs the updated `getManagedUsers()`)
+2. Re-save the user mapping for the managed account (overwrites the old cloud token with the new local one)
+3. Delete the existing broken playlist link and recreate it
+4. Click Sync now and check container logs
+
+**If this succeeds:** the token stored in `plex_user_mappings` will be a local-PMS-issued token, and both `searchTrack` (admin token) and `createPlaylist`/`addToPlaylist` (user token) should work.
+
+**If this fails:** container logs will show exactly what the local PMS returned. Next steps would depend on whether the endpoint exists, what format it returns, and whether it requires the managed user's PIN.
+
+### 10.6 Current state of each file
+
+| File | What changed from original |
+|---|---|
+| `src/lib/server/plex.ts` | `getManagedUsers()` uses local PMS switch (not plex.tv). `searchTrack` uses admin token (no `userToken` param). `X-Plex-User-Token` removed from `request()`. |
+| `src/lib/server/plex-sync.ts` | `searchTrack` call has no user token arg. `library_section_id` looked up via `root_folder_path`. |
+| `src/routes/api/plex/+server.ts` | `create_playlist_link` takes `mapping_id`, resolves token server-side. |
+| `src/routes/lists/[id]/+page.svelte` | Sends `mapping_id` not token. Sync message includes errors count. |
+| `src/lib/server/db.ts` | Migration peels double-encrypted `plex_playlists` tokens on startup. |
+
+### 10.7 Things NOT yet confirmed
+
+- Whether `POST {localPms}/home/users/{id}/switch` exists on all PMS versions and returns the expected token format.
+- Whether §6.2 (POST /playlists JSON response shape) and §6.3 (uri format for multi-track) are correct. These haven't been hit yet because all deploys so far have 401'd before reaching playlist creation successfully.

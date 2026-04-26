@@ -328,46 +328,60 @@ export async function getManagedUsers(
 		console.warn('[plex] No users parsed from /api/home/users XML. Raw (first 500 chars):', xmlText.substring(0, 500));
 	}
 
-	// ── Step 2: Get per-user token via switch ─────────────────────────────────
-	// POST /api/home/users/{id}/switch → XML response with authenticationToken attribute
+	// ── Step 2: Get per-user LOCAL PMS token via local switch endpoint ──────────
+	// Managed/family account tokens from the plex.tv switch endpoint are cloud
+	// credentials that the local PMS rejects for all operations. We call the LOCAL
+	// PMS /home/users/{id}/switch with the admin token instead — this returns a
+	// token the local server actually accepts for playlist creation and modification.
 	const users: PlexManagedUser[] = [];
 	const failures: PlexManagedUserFailure[] = [];
 
 	for (const user of userList) {
 		try {
-			const switchUrl = `https://plex.tv/api/home/users/${user.id}/switch`;
-			const switchResponse = await fn(switchUrl, {
+			// Call the LOCAL PMS switch endpoint (not plex.tv) using the admin token.
+			// The local PMS returns JSON or XML with authToken for that managed user.
+			const localSwitchUrl = `${config.baseUrl}/home/users/${user.id}/switch`;
+			console.log(`[plex] Switching to user "${user.title}" via local PMS: ${localSwitchUrl}`);
+
+			const switchResponse = await fn(localSwitchUrl, {
 				method: 'POST',
 				headers: {
 					'X-Plex-Token': config.adminToken,
 					'X-Plex-Client-Identifier': PLEX_CLIENT_ID,
-					'X-Plex-Product': PLEX_PRODUCT
-					// No Accept: application/json — returns XML
+					'X-Plex-Product': PLEX_PRODUCT,
+					Accept: 'application/json'
 				},
 				signal: AbortSignal.timeout(15_000)
 			});
 
-			if (switchResponse.ok) {
-				const switchXml = await switchResponse.text();
-				// Extract authenticationToken from XML attribute
-				const tokenMatch = switchXml.match(/authenticationToken="([^"]+)"/);
-				const token = tokenMatch?.[1];
+			const switchText = await switchResponse.text();
+			console.log(`[plex] Local switch response for "${user.title}" — HTTP ${switchResponse.status}, body (first 300): ${switchText.substring(0, 300)}`);
 
-				if (token) {
-					users.push({
-						id: user.id,
-						title: user.title,
-						accessToken: token
-					});
-				} else {
-					const reason = `Switch succeeded but authenticationToken not found in XML. Response (first 500 chars): ${switchXml.substring(0, 500)}`;
-					console.error(`[plex] ${reason}`);
-					failures.push({ id: user.id, title: user.title, reason });
-				}
+			if (!switchResponse.ok) {
+				const reason = `Local PMS switch HTTP ${switchResponse.status}: ${switchText.substring(0, 200)}`;
+				console.error(`[plex] ${reason}`);
+				failures.push({ id: user.id, title: user.title, reason });
+				continue;
+			}
+
+			// Try JSON first (Accept: application/json), fall back to XML attribute scan
+			let token: string | undefined;
+			try {
+				const json = JSON.parse(switchText);
+				// Local PMS JSON response: { User: { authToken: "..." } } or { MediaContainer: { User: { authToken: "..." } } }
+				token = json?.User?.authToken ?? json?.MediaContainer?.User?.authToken;
+			} catch {
+				// Not JSON — try XML attribute
+				token = switchText.match(/authToken="([^"]+)"/)?.[1]
+					?? switchText.match(/authenticationToken="([^"]+)"/)?.[1];
+			}
+
+			if (token) {
+				console.log(`[plex] Got local PMS token for "${user.title}" (length ${token.length})`);
+				users.push({ id: user.id, title: user.title, accessToken: token });
 			} else {
-				const errText = await switchResponse.text();
-				const reason = `HTTP ${switchResponse.status}: ${errText.substring(0, 200)}`;
-				console.error(`[plex] Switch failed for "${user.title}" — ${reason}`);
+				const reason = `Local switch succeeded but no authToken found. Body: ${switchText.substring(0, 300)}`;
+				console.error(`[plex] ${reason}`);
 				failures.push({ id: user.id, title: user.title, reason });
 			}
 		} catch (err) {
