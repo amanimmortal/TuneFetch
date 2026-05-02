@@ -240,7 +240,7 @@ export function appendTrackFilters(baseQuery: string): string {
 	const negations = NOISE_SECONDARY_TYPES_LUCENE
 		.map((t) => `NOT secondarytype:${t}`)
 		.join(' ');
-	return `${baseQuery} AND status:official ${negations}`;
+	return `(${baseQuery}) AND (status:official ${negations})`;
 }
 
 /**

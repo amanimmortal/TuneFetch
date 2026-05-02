@@ -86,15 +86,23 @@ interface CacheRow {
 	tier: number;
 }
 
+// Prepared statements initialised once on first call to avoid per-invocation prepare overhead.
+let _stmtGet: ReturnType<ReturnType<typeof getDb>['prepare']> | null = null;
+let _stmtUpsert: ReturnType<ReturnType<typeof getDb>['prepare']> | null = null;
+
 // Cache-aware wrapper: looks up recording_mbid in SQLite, resolves on miss, writes through.
 export function resolveCanonicalAlbumCached(rec: MBRecording): CanonicalAlbum | null {
 	const db = getDb();
+	_stmtGet ??= db.prepare(
+		'SELECT release_group_mbid, release_group_title, year, tier FROM canonical_album_cache WHERE recording_mbid = ?'
+	);
+	_stmtUpsert ??= db.prepare(
+		`INSERT OR REPLACE INTO canonical_album_cache
+		  (recording_mbid, release_group_mbid, release_group_title, year, tier, cached_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`
+	);
 
-	const cached = db
-		.prepare(
-			'SELECT release_group_mbid, release_group_title, year, tier FROM canonical_album_cache WHERE recording_mbid = ?'
-		)
-		.get(rec.id) as CacheRow | undefined;
+	const cached = _stmtGet.get(rec.id) as CacheRow | undefined;
 
 	if (cached) {
 		return {
@@ -108,11 +116,14 @@ export function resolveCanonicalAlbumCached(rec: MBRecording): CanonicalAlbum | 
 	const result = resolveCanonicalAlbum(rec);
 
 	if (result) {
-		db.prepare(
-			`INSERT OR REPLACE INTO canonical_album_cache
-			  (recording_mbid, release_group_mbid, release_group_title, year, tier, cached_at)
-			 VALUES (?, ?, ?, ?, ?, ?)`
-		).run(rec.id, result.releaseGroupMbid, result.title, result.year, result.tier, Math.floor(Date.now() / 1000));
+		_stmtUpsert.run(
+			rec.id,
+			result.releaseGroupMbid,
+			result.title,
+			result.year,
+			result.tier,
+			Math.floor(Date.now() / 1000)
+		);
 	}
 
 	return result;
