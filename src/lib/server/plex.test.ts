@@ -1,215 +1,277 @@
 /**
- * Unit tests for getManagedUsers() — plex.ts
+ * Unit tests for plex.ts public API.
  *
  * Strategy:
  *   - vi.mock('./settings') so readConfig() never hits the database.
- *   - Inject a typed mock fetchFn into getManagedUsers() to control HTTP responses.
- *   - All assertions target the post-fix return shape: { users, failures }.
+ *   - Inject a typed mock fetchFn into each function to control HTTP responses.
+ *   - resetPlexCache() between tests to clear admin/machine memoization.
  *
- * Test cases per handover doc Section 8.1:
- *   1. Happy path              — 2 users, both tokens found → 2 users, 0 failures
- *   2. Step 1 HTTP error       — /home/users returns 401    → throws PlexError(401)
- *   3. Step 2 HTTP error (one) — one user 200, one user 403 → 1 user, 1 failure
- *   4. Step 2 missing token    — switch OK, no authenticationToken attr → 1 failure
- *   5. Step 2 exception        — fetchFn throws AbortError  → 1 failure with "aborted"
- *   6. All users fail          — all 4 fail in step 2       → { users: [], failures: [x4] }
+ * What we cover here matches the post-rewrite token model (PLEX_REVIEW.md §10):
+ *   - getManagedUsers() resolves per-user tokens via /api/servers/{machineId}/shared_servers.
+ *   - The admin user is included in the result with the admin token.
+ *   - Home users without library access are returned in `failures`, not `users`.
+ *   - getUserAccessToken() returns the admin token for the owner and the
+ *     shared_servers token for everyone else.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { getManagedUsers, PlexError } from './plex';
-import type { PlexManagedUser } from './plex';
-
-// ── Types for the post-fix API ────────────────────────────────────────────────
-
-interface PlexManagedUserFailure {
-	id: number;
-	title: string;
-	reason: string;
-}
-
-interface GetManagedUsersResult {
-	users: PlexManagedUser[];
-	failures: PlexManagedUserFailure[];
-}
+import {
+	getManagedUsers,
+	getUserAccessToken,
+	resetPlexCache,
+	PlexError
+} from './plex';
 
 // ── Module mock: settings ─────────────────────────────────────────────────────
 
 vi.mock('./settings', () => ({
 	getSetting: vi.fn((key: string) => {
 		if (key === 'plex_url') return 'http://plex.local:32400';
-		if (key === 'plex_admin_token') return 'test-admin-token';
+		if (key === 'plex_admin_token') return 'admin-token';
 		return null;
 	}),
 	SETTING_KEYS: {
 		PLEX_URL: 'plex_url',
-		PLEX_ADMIN_TOKEN: 'plex_admin_token',
-	},
+		PLEX_ADMIN_TOKEN: 'plex_admin_token'
+	}
 }));
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+const MACHINE_ID = 'mid-abc123';
+const ADMIN_ID = 1000;
+
 function makeResponse(status: number, body: string): Response {
 	return new Response(body, { status });
+}
+
+function identityJson(): string {
+	return JSON.stringify({
+		MediaContainer: {
+			machineIdentifier: MACHINE_ID,
+			version: '1.40.0',
+			friendlyName: 'TestServer'
+		}
+	});
+}
+
+function adminUserJson(): string {
+	return JSON.stringify({ id: ADMIN_ID, title: 'Admin User', username: 'admin' });
 }
 
 function homeUsersXml(users: Array<{ id: number; title: string }>): string {
 	const elements = users
 		.map((u) => `<User id="${u.id}" title="${u.title}" />`)
 		.join('\n');
-	return `<MediaContainer>\n${elements}\n</MediaContainer>`;
+	return `<MediaContainer>${elements}</MediaContainer>`;
 }
 
-function switchSuccessXml(token: string): string {
-	return `<MediaContainer><User authenticationToken="${token}" /></MediaContainer>`;
-}
-
-function switchSuccessNoTokenXml(): string {
-	return `<MediaContainer><User someOtherAttr="value" /></MediaContainer>`;
+function sharedServersXml(entries: Array<{ userID: number; accessToken: string }>): string {
+	const elements = entries
+		.map(
+			(e) =>
+				`<SharedServer userID="${e.userID}" accessToken="${e.accessToken}" />`
+		)
+		.join('\n');
+	return `<MediaContainer>${elements}</MediaContainer>`;
 }
 
 type FetchFn = (url: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
+/**
+ * Build a fetch stub that responds to the four endpoints touched by
+ * getManagedUsers / getUserAccessToken.
+ */
+function buildFetch(opts: {
+	identity?: { status: number; body: string };
+	adminUser?: { status: number; body: string };
+	homeUsers?: { status: number; body: string };
+	sharedServers?: { status: number; body: string };
+}): FetchFn {
+	return vi.fn(async (url) => {
+		const u = String(url);
+		if (u.startsWith('http://plex.local:32400/') && u.endsWith('/')) {
+			const r = opts.identity ?? { status: 200, body: identityJson() };
+			return makeResponse(r.status, r.body);
+		}
+		if (u === 'http://plex.local:32400/') {
+			const r = opts.identity ?? { status: 200, body: identityJson() };
+			return makeResponse(r.status, r.body);
+		}
+		if (u.includes('plex.tv/api/v2/user')) {
+			const r = opts.adminUser ?? { status: 200, body: adminUserJson() };
+			return makeResponse(r.status, r.body);
+		}
+		if (u.includes('plex.tv/api/home/users')) {
+			const r = opts.homeUsers ?? { status: 200, body: homeUsersXml([]) };
+			return makeResponse(r.status, r.body);
+		}
+		if (u.includes('/shared_servers')) {
+			const r = opts.sharedServers ?? { status: 200, body: sharedServersXml([]) };
+			return makeResponse(r.status, r.body);
+		}
+		return makeResponse(500, `unexpected url: ${u}`);
+	}) as FetchFn;
+}
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe('getManagedUsers()', () => {
 	beforeEach(() => {
+		resetPlexCache();
 		vi.clearAllMocks();
 	});
 
-	// ── Test 1: Happy path ────────────────────────────────────────────────────
-
-	it('happy path — returns 2 users and 0 failures when all switch calls succeed', async () => {
-		const twoUsers = [
-			{ id: 1, title: 'Alice' },
-			{ id: 2, title: 'Bob' },
-		];
-
-		const mockFetch: FetchFn = vi.fn(async (url) => {
-			const urlStr = String(url);
-			if (urlStr.includes('/api/home/users') && !urlStr.includes('/switch')) {
-				return makeResponse(200, homeUsersXml(twoUsers));
+	it('happy path — admin + 2 home users with library access → 3 users, 0 failures', async () => {
+		const fetchFn = buildFetch({
+			homeUsers: {
+				status: 200,
+				body: homeUsersXml([
+					{ id: 2001, title: 'Alice' },
+					{ id: 2002, title: 'Bob' }
+				])
+			},
+			sharedServers: {
+				status: 200,
+				body: sharedServersXml([
+					{ userID: 2001, accessToken: 'token-alice' },
+					{ userID: 2002, accessToken: 'token-bob' }
+				])
 			}
-			if (urlStr.includes('/1/switch')) return makeResponse(200, switchSuccessXml('token-alice'));
-			if (urlStr.includes('/2/switch')) return makeResponse(200, switchSuccessXml('token-bob'));
-			return makeResponse(500, 'unexpected URL');
 		});
 
-		const result = (await getManagedUsers(mockFetch)) as unknown as GetManagedUsersResult;
+		const result = await getManagedUsers(fetchFn);
 
-		expect(result.users).toHaveLength(2);
-		expect(result.users[0]).toMatchObject({ id: 1, title: 'Alice', accessToken: 'token-alice' });
-		expect(result.users[1]).toMatchObject({ id: 2, title: 'Bob', accessToken: 'token-bob' });
+		expect(result.users).toHaveLength(3);
+		expect(result.users[0]).toMatchObject({
+			id: ADMIN_ID,
+			title: 'Admin User',
+			accessToken: 'admin-token',
+			isAdmin: true
+		});
+		expect(result.users[1]).toMatchObject({
+			id: 2001,
+			title: 'Alice',
+			accessToken: 'token-alice'
+		});
+		expect(result.users[2]).toMatchObject({
+			id: 2002,
+			title: 'Bob',
+			accessToken: 'token-bob'
+		});
 		expect(result.failures).toHaveLength(0);
 	});
 
-	// ── Test 2: Step 1 HTTP error ─────────────────────────────────────────────
-
-	it('step 1 HTTP 401 — throws PlexError with status 401', async () => {
-		const mockFetch: FetchFn = vi.fn(async () => makeResponse(401, 'Unauthorized'));
-
-		await expect(getManagedUsers(mockFetch)).rejects.toThrow(PlexError);
-		await expect(getManagedUsers(mockFetch)).rejects.toMatchObject({ status: 401 });
-	});
-
-	// ── Test 3: Step 2 HTTP error for one user ────────────────────────────────
-
-	it('step 2 HTTP 403 for one user — returns 1 user and 1 failure', async () => {
-		const twoUsers = [
-			{ id: 10, title: 'Carol' },
-			{ id: 11, title: 'Dave' },
-		];
-
-		const mockFetch: FetchFn = vi.fn(async (url) => {
-			const urlStr = String(url);
-			if (urlStr.includes('/api/home/users') && !urlStr.includes('/switch')) {
-				return makeResponse(200, homeUsersXml(twoUsers));
+	it('home user with no library shared → ends up in failures, not users', async () => {
+		const fetchFn = buildFetch({
+			homeUsers: {
+				status: 200,
+				body: homeUsersXml([
+					{ id: 2001, title: 'Alice' },
+					{ id: 2002, title: 'Bob' }
+				])
+			},
+			sharedServers: {
+				status: 200,
+				body: sharedServersXml([{ userID: 2001, accessToken: 'token-alice' }])
 			}
-			if (urlStr.includes('/10/switch')) return makeResponse(200, switchSuccessXml('token-carol'));
-			if (urlStr.includes('/11/switch')) return makeResponse(403, 'Forbidden');
-			return makeResponse(500, 'unexpected');
 		});
 
-		const result = (await getManagedUsers(mockFetch)) as unknown as GetManagedUsersResult;
+		const result = await getManagedUsers(fetchFn);
 
-		expect(result.users).toHaveLength(1);
-		expect(result.users[0]).toMatchObject({ id: 10, title: 'Carol', accessToken: 'token-carol' });
+		expect(result.users.find((u) => u.id === 2001)).toBeDefined();
+		expect(result.users.find((u) => u.id === 2002)).toBeUndefined();
 		expect(result.failures).toHaveLength(1);
-		expect(result.failures[0]).toMatchObject({ id: 11, title: 'Dave' });
-		expect(result.failures[0].reason).toMatch(/403/);
+		expect(result.failures[0]).toMatchObject({ id: 2002, title: 'Bob' });
+		expect(result.failures[0].reason).toMatch(/library/i);
 	});
 
-	// ── Test 4: Step 2 missing authenticationToken ────────────────────────────
-
-	it('step 2 OK but no authenticationToken attr — produces failure with XML snippet', async () => {
-		const oneUser = [{ id: 20, title: 'Eve' }];
-
-		const mockFetch: FetchFn = vi.fn(async (url) => {
-			const urlStr = String(url);
-			if (urlStr.includes('/api/home/users') && !urlStr.includes('/switch')) {
-				return makeResponse(200, homeUsersXml(oneUser));
+	it('admin appears in home_users too — not duplicated, listed once with admin token', async () => {
+		const fetchFn = buildFetch({
+			homeUsers: {
+				status: 200,
+				body: homeUsersXml([
+					{ id: ADMIN_ID, title: 'Admin User' },
+					{ id: 2001, title: 'Alice' }
+				])
+			},
+			sharedServers: {
+				status: 200,
+				body: sharedServersXml([{ userID: 2001, accessToken: 'token-alice' }])
 			}
-			if (urlStr.includes('/20/switch')) return makeResponse(200, switchSuccessNoTokenXml());
-			return makeResponse(500, 'unexpected');
 		});
 
-		const result = (await getManagedUsers(mockFetch)) as unknown as GetManagedUsersResult;
+		const result = await getManagedUsers(fetchFn);
 
-		expect(result.users).toHaveLength(0);
-		expect(result.failures).toHaveLength(1);
-		expect(result.failures[0]).toMatchObject({ id: 20, title: 'Eve' });
-		// reason should contain the raw XML so the dev can diagnose a shape change
-		expect(result.failures[0].reason).toMatch(/someOtherAttr/);
+		expect(result.users.filter((u) => u.id === ADMIN_ID)).toHaveLength(1);
+		expect(result.users[0]).toMatchObject({
+			id: ADMIN_ID,
+			accessToken: 'admin-token',
+			isAdmin: true
+		});
 	});
 
-	// ── Test 5: Step 2 exception (AbortError) ────────────────────────────────
-
-	it('step 2 throws AbortError — produces failure with "aborted" in reason', async () => {
-		const oneUser = [{ id: 30, title: 'Frank' }];
-
-		const mockFetch: FetchFn = vi.fn(async (url) => {
-			const urlStr = String(url);
-			if (urlStr.includes('/api/home/users') && !urlStr.includes('/switch')) {
-				return makeResponse(200, homeUsersXml(oneUser));
-			}
-			throw new DOMException('The operation was aborted.', 'AbortError');
+	it('shared_servers HTTP 401 → throws PlexError', async () => {
+		const fetchFn = buildFetch({
+			homeUsers: { status: 200, body: homeUsersXml([{ id: 2001, title: 'Alice' }]) },
+			sharedServers: { status: 401, body: 'Unauthorized' }
 		});
 
-		const result = (await getManagedUsers(mockFetch)) as unknown as GetManagedUsersResult;
-
-		expect(result.users).toHaveLength(0);
-		expect(result.failures).toHaveLength(1);
-		expect(result.failures[0]).toMatchObject({ id: 30, title: 'Frank' });
-		// describeFetchError uses error.message + [code], not error.name.
-		// DOMException AbortError has message "The operation was aborted." and numeric code 20.
-		expect(result.failures[0].reason).toMatch(/aborted/i);
+		await expect(getManagedUsers(fetchFn)).rejects.toThrow(PlexError);
+		await expect(
+			getManagedUsers(fetchFn).catch((e: PlexError) => e.status)
+		).resolves.toBe(401);
 	});
 
-	// ── Test 6: All users fail (production bug shape) ─────────────────────────
-
-	it('all 4 users fail in step 2 — returns { users: [], failures: [x4] }', async () => {
-		const fourUsers = [
-			{ id: 101, title: 'User1' },
-			{ id: 102, title: 'User2' },
-			{ id: 103, title: 'User3' },
-			{ id: 104, title: 'User4' },
-		];
-
-		const mockFetch: FetchFn = vi.fn(async (url) => {
-			const urlStr = String(url);
-			if (urlStr.includes('/api/home/users') && !urlStr.includes('/switch')) {
-				return makeResponse(200, homeUsersXml(fourUsers));
-			}
-			// All switch calls fail with 400 (e.g. PIN required)
-			return makeResponse(400, 'PIN required');
+	it('home_users HTTP 401 → throws PlexError', async () => {
+		const fetchFn = buildFetch({
+			homeUsers: { status: 401, body: 'Unauthorized' }
 		});
 
-		const result = (await getManagedUsers(mockFetch)) as unknown as GetManagedUsersResult;
+		await expect(getManagedUsers(fetchFn)).rejects.toThrow(PlexError);
+	});
+});
 
-		// This is the exact production bug shape: found 4, returned 0
-		expect(result.users).toHaveLength(0);
-		expect(result.failures).toHaveLength(4);
-		for (const f of result.failures) {
-			expect(f.reason).toMatch(/400/);
-		}
+describe('getUserAccessToken()', () => {
+	beforeEach(() => {
+		resetPlexCache();
+		vi.clearAllMocks();
+	});
+
+	it('returns admin token when plexUserId is the server owner', async () => {
+		const fetchFn = buildFetch({});
+
+		const token = await getUserAccessToken(ADMIN_ID, fetchFn);
+		expect(token).toBe('admin-token');
+	});
+
+	it('returns shared_servers accessToken for a home user with library access', async () => {
+		const fetchFn = buildFetch({
+			sharedServers: {
+				status: 200,
+				body: sharedServersXml([{ userID: 2001, accessToken: 'token-alice' }])
+			}
+		});
+
+		const token = await getUserAccessToken(2001, fetchFn);
+		expect(token).toBe('token-alice');
+	});
+
+	it('returns null when the user has no shared_servers entry', async () => {
+		const fetchFn = buildFetch({
+			sharedServers: { status: 200, body: sharedServersXml([]) }
+		});
+
+		const token = await getUserAccessToken(2001, fetchFn);
+		expect(token).toBeNull();
+	});
+
+	it('returns null on plex.tv error rather than throwing', async () => {
+		const fetchFn = buildFetch({
+			sharedServers: { status: 500, body: 'Server error' }
+		});
+
+		const token = await getUserAccessToken(2001, fetchFn);
+		expect(token).toBeNull();
 	});
 });
