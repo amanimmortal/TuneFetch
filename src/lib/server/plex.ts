@@ -272,8 +272,12 @@ export async function refreshLibrarySection(
 
 /**
  * Pull every attribute from each occurrence of `<tagName ...>` into a flat
- * object. Attribute names allow any characters that XML 1.0 permits in a
- * Name except whitespace, `=`, `/`, `>`, and quote chars — so namespaced
+ * object. Tag matching is case-insensitive so callers don't have to probe
+ * every casing Plex might serve (`<user>` vs `<User>`); the trailing `\s`
+ * still prevents prefix collisions like `<UserList ...>` matching `User`.
+ *
+ * Attribute names allow any characters that XML 1.0 permits in a Name
+ * except whitespace, `=`, `/`, `>`, and quote chars — so namespaced
  * (`xml:lang`) and hyphenated (`data-foo`) attributes are captured too.
  * Values are read from double-quoted strings only (Plex always uses those).
  */
@@ -281,7 +285,7 @@ function parseXmlAttributes(xml: string, tagName: string): Array<Record<string, 
 	const result: Array<Record<string, string>> = [];
 	const tagRegex = new RegExp(
 		`<${tagName}\\s([^>]*?)/?>|<${tagName}\\s([^>]*?)>`,
-		'g'
+		'gi'
 	);
 	for (const m of xml.matchAll(tagRegex)) {
 		const attrText = m[1] ?? m[2] ?? '';
@@ -297,14 +301,21 @@ function parseXmlAttributes(xml: string, tagName: string): Array<Record<string, 
 async function plexTvGet(
 	url: string,
 	adminToken: string,
-	fn: FetchFn
-): Promise<{ status: number; text: string }> {
+	fn: FetchFn,
+	accept: 'json' | 'xml' = 'xml'
+): Promise<{ status: number; text: string; contentType: string }> {
 	const resp = await fn(url, {
 		method: 'GET',
-		headers: plexHeaders(adminToken),
+		headers: plexHeaders(adminToken, {
+			Accept: accept === 'json' ? 'application/json' : 'application/xml'
+		}),
 		signal: AbortSignal.timeout(15_000)
 	});
-	return { status: resp.status, text: await resp.text() };
+	return {
+		status: resp.status,
+		text: await resp.text(),
+		contentType: resp.headers.get('content-type') ?? ''
+	};
 }
 
 /**
@@ -373,10 +384,15 @@ async function getAdminAccount(
 	fn: FetchFn
 ): Promise<AdminAccount> {
 	if (_adminAccount) return _adminAccount;
-	const { status, text } = await plexTvGet(
+	// Ask for JSON explicitly. plex.tv has been observed to ignore Accept and
+	// serve XML for this endpoint anyway, so we route on the response's
+	// Content-Type header rather than guessing from the body. Both shapes
+	// carry the same id/title/username at the top of the document.
+	const { status, text, contentType } = await plexTvGet(
 		'https://plex.tv/api/v2/user',
 		adminToken,
-		fn
+		fn,
+		'json'
 	);
 	if (status !== 200) {
 		throw new PlexError(
@@ -385,34 +401,48 @@ async function getAdminAccount(
 			text
 		);
 	}
+
 	let id: number | undefined;
 	let title: string | undefined;
 	let username: string | undefined;
-	try {
-		const json = JSON.parse(text) as {
-			id?: number;
-			title?: string;
-			username?: string;
-			friendlyName?: string;
-		};
-		id = json.id;
-		title = json.title ?? json.friendlyName ?? json.username;
-		username = json.username;
-	} catch {
-		// /api/v2/user returns JSON; if not, surface as a config issue.
+
+	const isJson = contentType.toLowerCase().includes('json');
+	if (isJson) {
+		try {
+			const json = JSON.parse(text) as {
+				id?: number;
+				title?: string;
+				username?: string;
+				friendlyName?: string;
+			};
+			id = json.id;
+			title = json.title ?? json.friendlyName ?? json.username;
+			username = json.username;
+		} catch {
+			// Server claimed JSON but body wasn't parseable — fall through to XML.
+		}
+	}
+
+	if (id === undefined) {
+		// XML path. parseXmlAttributes is case-insensitive so this single call
+		// covers <user>, <User>, etc.
+		const userAttrs = parseXmlAttributes(text, 'user')[0];
+		if (userAttrs) {
+			const parsedId = userAttrs.id ? parseInt(userAttrs.id, 10) : NaN;
+			if (!Number.isNaN(parsedId)) id = parsedId;
+			title = userAttrs.title ?? userAttrs.friendlyName ?? userAttrs.username;
+			username = userAttrs.username;
+		}
+	}
+
+	if (id === undefined) {
 		throw new PlexError(
-			'plex.tv /api/v2/user returned non-JSON response',
+			`plex.tv /api/v2/user response could not be parsed (content-type: ${contentType || 'unset'})`,
 			status,
-			text.slice(0, 300)
+			text.slice(0, 500)
 		);
 	}
-	if (!id) {
-		throw new PlexError(
-			'plex.tv /api/v2/user response missing id field',
-			status,
-			text.slice(0, 300)
-		);
-	}
+
 	_adminAccount = { id, title: title ?? `Admin (${id})`, username };
 	return _adminAccount;
 }
