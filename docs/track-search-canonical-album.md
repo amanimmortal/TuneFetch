@@ -155,26 +155,38 @@ Combine the cheap stuff at the query level, then do the smart sort locally, then
 
 1. **Pre-filter** (Strategy 1 + 8): Always append to track-search Lucene queries:
    ```
-   AND status:official NOT secondarytype:live NOT secondarytype:compilation NOT secondarytype:remix NOT secondarytype:soundtrack NOT secondarytype:demo NOT secondarytype:interview NOT secondarytype:audio_drama NOT secondarytype:spokenword
+   AND status:official
+     NOT secondarytype:live NOT secondarytype:remix NOT secondarytype:demo
+     NOT secondarytype:interview NOT secondarytype:"audio drama"
+     NOT secondarytype:"dj-mix" NOT secondarytype:spokenword
+     NOT secondarytype:audiobook NOT secondarytype:"mixtape/street"
    ```
-   If the result count is 0, retry without the secondary-type negations (recall fallback).
+   *Compilation is intentionally NOT in this list* — see the note below. If the result count is 0, retry with the bare query as a recall fallback.
+
+   > **Note on Compilation.** The user's stated goal is "original album, or fall back to a remastered best-of." That means compilations must remain *discoverable* in the initial search — otherwise a recording that lives only on compilations (a common case for older catalogues) returns zero rows under the strict filter, and the recall fallback then drops *all* noise filters, polluting the result with live/karaoke/etc. The cleaner contract: pre-filter strips obvious noise (live, remix, karaoke, demo, interview, audio drama, dj-mix, spokenword, audiobook, mixtape); the resolver demotes compilation-only recordings to Tier 3 so they appear *only* when no album/EP/single is available. Single source of truth for the noise list lives in 4.1a.
 
 2. **Enrich** (Strategy 2): Switch `searchTrack()` to include `inc=releases+release-groups+artist-credits` on the `/recording` query. This gives us release-group primary/secondary types and dates inline — no extra round trips.
 
-3. **Resolve the canonical album per recording** (Strategy 2 matrix + Strategy 5 scoring + Strategy 6 tiebreaker):
-   - For each recording, walk its release-groups and pick the best one using the tiered matrix:
-     - **Tier 1:** `primary-type=Album`, no secondary-types → pick earliest by `first-release-date`.
-     - **Tier 2:** `primary-type=EP` or `Single` → earliest.
-     - **Tier 3:** `primary-type=Album`, secondary-types includes `Compilation` (and *only* Compilation) → earliest.
-     - **Tier 4 (last resort):** Any release-group → earliest.
-   - Drop release-groups containing `Live`, `Remix`, `Interview`, `DJ-mix`, `Audio drama`, `Spokenword` in `secondary-types` *before* the tiers run.
-   - Apply the composite score (Strategy 5) to break ties between recordings that resolved to similarly-tiered albums; prefer the recording with the highest release-group count (Strategy 6) within the same tier.
+3. **Resolve the canonical album per recording** — tiered matrix (Strategy 2):
+   - For each recording, walk its release-groups. Drop any whose `secondary-types` contains a value in the shared noise set (4.1a) *before* the tiers run.
+   - **Tier 1:** `primary-type=Album`, no secondary-types → pick earliest by `first-release-date`.
+   - **Tier 2:** `primary-type=EP` or `Single` → earliest.
+   - **Tier 3 (the "best-of" fallback):** `primary-type=Album` whose only secondary-type is `Compilation` → earliest.
+   - **Tier 4 (last resort):** Any remaining release-group → earliest.
 
-4. **Cache** (Strategy 7): Persist `recording_mbid → { release_group_mbid, release_group_title, year, tier }` in SQLite. Look up before resolving, write after.
+4. **Penalty signal within a tier** (Strategy 4): Title/disambiguation regex hits and absurd-duration recordings add a numeric penalty. Sort within tier by lowest penalty, then highest MB `score`, then earliest year. Penalties are **never** filters.
 
-5. **Title-regex penalty** (Strategy 4): Apply only as a score adjustment, never as a filter.
+5. **Cache** (Strategy 7): Persist `recording_mbid → { release_group_mbid, release_group_title, year, tier }` in SQLite. Look up before resolving, write after.
 
-6. **Defer**: Strategies 3, 9, 10, 11.
+### V1 scoring model — what's in, what's deferred
+
+To keep the v1 implementation honest about its complexity, the scoring is defined as: **tier first, penalty second, MB-score third, year fourth.** That's it. The composite-score weights table (Strategy 5) was a useful framing device for picking the *order* of these signals, but in v1 the tier number IS the dominant score bucket — no per-signal point arithmetic.
+
+**Explicitly deferred to v2** (do not implement in this pass):
+
+- **Strategy 5 — full composite scoring with per-signal weights.** Revisit only if the tier+penalty model shows a class of bad results that can't be fixed by adjusting the tier definitions or the penalty regex.
+- **Strategy 6 — recording-frequency heuristic** (prefer the recording referenced by the most release-groups). Adds a second pass over the result set and re-orders within tier; defer until we see whether the tier-based ordering already does the right thing for re-recordings.
+- **Strategies 3 (Works), 9 (UI dedup), 10 (country tiebreaker), 11 (lazy button).**
 
 ---
 
@@ -182,10 +194,80 @@ Combine the cheap stuff at the query level, then do the smart sort locally, then
 
 Files to touch:
 
-- `src/lib/server/musicbrainz.ts` — extend `searchTrack` and types.
+- `src/lib/server/musicbrainz.ts` — extend `searchTrack` and types; export the shared secondary-type constants (4.1a).
 - `src/routes/api/search/+server.ts` — wire in canonical-album resolution and cache.
 - `src/lib/server/db.ts` (or wherever the DB schema lives) — add a cache table.
 - `src/lib/server/orchestrator.test.ts` (and possibly a new `musicbrainz.test.ts`) — unit tests for the resolver.
+
+### 4.1a Centralised secondary-type constants (single source of truth)
+
+The Lucene pre-filter and the `BAD_SECONDARY` resolver set MUST share the same source list — otherwise they will drift. Add one module-level constant in `musicbrainz.ts` and derive both representations from it.
+
+**MusicBrainz secondary-type values** — the canonical list as MB returns it in JSON (Title-cased, with spaces, exact case-sensitive match required for `secondary-types` array comparison):
+
+```
+Audiobook
+Audio drama
+Broadcast
+Compilation
+Demo
+DJ-mix
+Field recording
+Interview
+Live
+Mixtape/Street
+Remix
+Soundtrack
+Spokenword
+```
+
+**Lucene search-field representation** — the `secondarytype` Lucene field is lowercased and tokenised on whitespace. To match a multi-word value as a single term, **quote it**: `secondarytype:"audio drama"`. Hyphenated values (`DJ-mix`) and slashed values (`Mixtape/Street`) similarly need quoting in Lucene. Single-word values (`live`, `remix`, etc.) work unquoted.
+
+> **Verify before implementing:** MB's Lucene index has historically lowercased values, but field-name and value-quoting behaviour around hyphens and slashes is the kind of thing that bites silently. The implementer should run two probe queries (one with quoting, one without) for `secondarytype:"audio drama"` and `secondarytype:"dj-mix"` against MB's real API and confirm the result counts differ in the expected direction before committing to the helper below.
+
+**Implementation:**
+
+```ts
+// In musicbrainz.ts — single source of truth.
+// Keys are the JSON values MB returns in the `secondary-types` array
+// (exact match, case-sensitive). The boolean is whether to treat the
+// type as "noise" — these are the ones we both negate in the Lucene
+// pre-filter AND drop in the resolver.
+export const SECONDARY_TYPE_CATALOGUE = {
+  Audiobook:        { noise: true },
+  'Audio drama':    { noise: true },
+  Broadcast:        { noise: false },
+  Compilation:      { noise: false }, // legitimate fallback — see §3 note
+  Demo:             { noise: true },
+  'DJ-mix':         { noise: true },
+  'Field recording':{ noise: false },
+  Interview:        { noise: true },
+  Live:             { noise: true },
+  'Mixtape/Street': { noise: true },
+  Remix:            { noise: true },
+  Soundtrack:       { noise: false }, // borderline — see §5 risk
+  Spokenword:       { noise: true }
+} as const;
+
+// JSON-shape values (exactly as MB returns them) — used by the resolver.
+export const NOISE_SECONDARY_TYPES_JSON: ReadonlySet<string> = new Set(
+  Object.entries(SECONDARY_TYPE_CATALOGUE)
+    .filter(([, meta]) => meta.noise)
+    .map(([name]) => name)
+);
+
+// Lucene-shape values — lowercased, with quoting where needed.
+// (Quoting is preserved here so the helper can drop the term in unchanged.)
+export const NOISE_SECONDARY_TYPES_LUCENE: readonly string[] =
+  Object.entries(SECONDARY_TYPE_CATALOGUE)
+    .filter(([, meta]) => meta.noise)
+    .map(([name]) => {
+      const lower = name.toLowerCase();
+      return /[\s/-]/.test(lower) ? `"${lower}"` : lower;
+    });
+```
+
+The resolver's `BAD_SECONDARY` (4.4) becomes `NOISE_SECONDARY_TYPES_JSON`. The Lucene helper (4.3) iterates `NOISE_SECONDARY_TYPES_LUCENE`. **Do not duplicate the list anywhere.**
 
 ### 4.1 Type additions in `musicbrainz.ts`
 
@@ -237,16 +319,16 @@ Verify whether `/recording` search supports `inc` — if it does **not** (some M
 
 ### 4.3 Update the Lucene query builder
 
-In `src/routes/api/search/+server.ts` track branch, after `buildQuery(fields)` produces the base query, append the pre-filter clauses. Build a helper in `musicbrainz.ts`:
+In `src/routes/api/search/+server.ts` track branch, after `buildQuery(fields)` produces the base query, append the pre-filter clauses. Build a helper in `musicbrainz.ts` that reuses the shared constant from 4.1a — **do not redeclare the list here**:
 
 ```ts
-const TRACK_NEGATIVE_SECONDARY_TYPES = [
-  'live', 'compilation', 'remix', 'soundtrack',
-  'demo', 'interview', 'audio_drama', 'spokenword'
-];
-
+// In musicbrainz.ts — uses NOISE_SECONDARY_TYPES_LUCENE from 4.1a.
+// Note: Compilation is intentionally NOT negated here. The user wants
+// compilations as a Tier 3 fallback (see §3 note), so they must remain
+// discoverable in the initial search; the resolver picks them only when
+// no album/EP/single tier hit is available.
 export function appendTrackFilters(baseQuery: string): string {
-  const negations = TRACK_NEGATIVE_SECONDARY_TYPES
+  const negations = NOISE_SECONDARY_TYPES_LUCENE
     .map((t) => `NOT secondarytype:${t}`).join(' ');
   return `${baseQuery} AND status:official ${negations}`;
 }
@@ -258,13 +340,13 @@ In the search handler:
 const strict = appendTrackFilters(query);
 let arr = await searchTrack(strict);
 if (arr.length === 0) {
-  // Recall fallback — try without the negations
-  arr = await searchTrack(`${query} AND status:official`);
-}
-if (arr.length === 0) {
-  arr = await searchTrack(query); // last resort
+  // Recall fallback — drop status:official too (some legitimate releases
+  // are flagged Bootleg or Pseudo-Release in MB).
+  arr = await searchTrack(query);
 }
 ```
+
+(The previous draft had three fallback rungs; with `compilation` removed from the negation list, the strict query is no longer "too strict to ever match a compilation-only recording," so the middle rung is unnecessary. Keep the no-filter rung for last-resort recall.)
 
 ### 4.4 Canonical-album resolver
 
@@ -272,10 +354,10 @@ New file `src/lib/server/canonicalAlbum.ts`:
 
 ```ts
 import type { MBRecording, MBReleaseGroupNested } from './musicbrainz';
+import { NOISE_SECONDARY_TYPES_JSON } from './musicbrainz';
 
-const BAD_SECONDARY = new Set([
-  'Live', 'Remix', 'Interview', 'DJ-mix', 'Audio drama', 'Spokenword'
-]);
+// BAD_SECONDARY is the shared noise list from 4.1a — do NOT redeclare here.
+const BAD_SECONDARY = NOISE_SECONDARY_TYPES_JSON;
 
 const TITLE_PENALTY_REGEX =
   /\b(live|remaster(ed)?|radio edit|instrumental|acoustic|karaoke|demo|mono|alternate)\b/i;
@@ -422,6 +504,7 @@ Add `src/lib/server/canonicalAlbum.test.ts` with fixtures covering:
 ## 5. Risks & open questions
 
 - **Does `/recording` search honour `inc=releases+release-groups`?** MB documents `inc` for *lookups*; behaviour on *searches* varies. **Verify before implementing 4.2** — if it doesn't work, fall back to per-recording lookups (slower; consider capping to top 25 recordings).
+- **Lucene secondary-type quoting.** The pre-filter relies on `secondarytype:"audio drama"` and `secondarytype:"dj-mix"` matching the way MB returns those values. The exact tokenisation of hyphenated and slashed values in MB's Lucene index is not perfectly documented. **Run probe queries before relying on the helper in 4.1a** — search for a known recording on an "Audio drama" release-group both with and without quoting, and compare result counts. If quoting behaves differently than expected, adjust the helper but keep the single source of truth.
 - **Rate limit blast.** With per-recording lookups, a cold cache for "Yesterday by The Beatles" could mean 25 sequential requests at 1 req/s = 25s. Acceptable for a request initiated by a human, but mention it in the loading state.
 - **Soundtrack tracks** — should "Eye of the Tiger" surface its soundtrack album or its parent studio album? Decide policy. Current draft *keeps* soundtrack release-groups (only the obvious noise types are in `BAD_SECONDARY`).
 - **Live / Remix bands & albums** — Strategy 4 regex penalty avoids the false-positive trap of Strategy 4 used as a hard filter, but verify with the band "Live" and an album literally titled "Acoustic" before shipping.
@@ -431,7 +514,9 @@ Add `src/lib/server/canonicalAlbum.test.ts` with fixtures covering:
 
 ## 6. Out of scope for this change
 
-- Frontend dedup / "show all versions" disclosure (Strategy 9). Land server-side first, iterate.
-- Work-based traversal (Strategy 3).
-- Country/origin tiebreaker (Strategy 10).
-- Lazy on-demand resolution button (Strategy 11).
+- **Strategy 5 — full composite scoring with per-signal weights.** v1 uses tier + penalty + MB-score + year only.
+- **Strategy 6 — recording-frequency heuristic.** v1 does not count release-group references per recording.
+- **Strategy 3 — Work-based traversal.**
+- **Strategy 9 — Frontend dedup / "show all versions" disclosure.** Land server-side first, iterate.
+- **Strategy 10 — Country/origin tiebreaker.**
+- **Strategy 11 — Lazy on-demand resolution button.**
