@@ -297,11 +297,14 @@ function parseXmlAttributes(xml: string, tagName: string): Array<Record<string, 
 async function plexTvGet(
 	url: string,
 	adminToken: string,
-	fn: FetchFn
+	fn: FetchFn,
+	accept: 'json' | 'xml' = 'xml'
 ): Promise<{ status: number; text: string }> {
 	const resp = await fn(url, {
 		method: 'GET',
-		headers: plexHeaders(adminToken),
+		headers: plexHeaders(adminToken, {
+			Accept: accept === 'json' ? 'application/json' : 'application/xml'
+		}),
 		signal: AbortSignal.timeout(15_000)
 	});
 	return { status: resp.status, text: await resp.text() };
@@ -373,10 +376,15 @@ async function getAdminAccount(
 	fn: FetchFn
 ): Promise<AdminAccount> {
 	if (_adminAccount) return _adminAccount;
+	// Ask for JSON explicitly. Older or differently-configured plex.tv responses
+	// have been observed to ignore Accept and serve XML, so we fall back to
+	// parsing XML attributes if JSON.parse fails — both shapes carry the same
+	// id/title/username at the top of the document.
 	const { status, text } = await plexTvGet(
 		'https://plex.tv/api/v2/user',
 		adminToken,
-		fn
+		fn,
+		'json'
 	);
 	if (status !== 200) {
 		throw new PlexError(
@@ -385,34 +393,49 @@ async function getAdminAccount(
 			text
 		);
 	}
+
 	let id: number | undefined;
 	let title: string | undefined;
 	let username: string | undefined;
-	try {
-		const json = JSON.parse(text) as {
-			id?: number;
-			title?: string;
-			username?: string;
-			friendlyName?: string;
-		};
-		id = json.id;
-		title = json.title ?? json.friendlyName ?? json.username;
-		username = json.username;
-	} catch {
-		// /api/v2/user returns JSON; if not, surface as a config issue.
+
+	const trimmed = text.trim();
+	if (trimmed.startsWith('{')) {
+		try {
+			const json = JSON.parse(trimmed) as {
+				id?: number;
+				title?: string;
+				username?: string;
+				friendlyName?: string;
+			};
+			id = json.id;
+			title = json.title ?? json.friendlyName ?? json.username;
+			username = json.username;
+		} catch {
+			// fall through to XML parsing
+		}
+	}
+
+	if (id === undefined) {
+		// XML fallback: <user id="..." title="..." username="..." friendlyName="..." />
+		// (also seen as <User .../>; try both.)
+		const userAttrs =
+			parseXmlAttributes(text, 'user')[0] ?? parseXmlAttributes(text, 'User')[0];
+		if (userAttrs) {
+			const parsedId = userAttrs.id ? parseInt(userAttrs.id, 10) : NaN;
+			if (!Number.isNaN(parsedId)) id = parsedId;
+			title = userAttrs.title ?? userAttrs.friendlyName ?? userAttrs.username;
+			username = userAttrs.username;
+		}
+	}
+
+	if (id === undefined) {
 		throw new PlexError(
-			'plex.tv /api/v2/user returned non-JSON response',
+			'plex.tv /api/v2/user response could not be parsed as JSON or XML',
 			status,
-			text.slice(0, 300)
+			text.slice(0, 500)
 		);
 	}
-	if (!id) {
-		throw new PlexError(
-			'plex.tv /api/v2/user response missing id field',
-			status,
-			text.slice(0, 300)
-		);
-	}
+
 	_adminAccount = { id, title: title ?? `Admin (${id})`, username };
 	return _adminAccount;
 }

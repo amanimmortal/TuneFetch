@@ -261,6 +261,34 @@ describe('getManagedUsers()', () => {
 		});
 	});
 
+	it('falls back to XML parsing when /api/v2/user returns XML instead of JSON', async () => {
+		// Reproduces the production failure: plex.tv served XML for /api/v2/user
+		// despite Accept: application/json. The XML fallback should still pull
+		// id/title/username out of the <user> element.
+		const fetchFn = buildFetch({
+			adminUser: {
+				status: 200,
+				body: `<user id="${ADMIN_ID}" title="Admin User" username="admin" />`
+			},
+			homeUsers: { status: 200, body: homeUsersXml([{ id: 2001, title: 'Alice' }]) },
+			sharedServers: {
+				status: 200,
+				body: sharedServersXml([{ userID: 2001, accessToken: 'token-alice' }])
+			}
+		});
+
+		const result = await getManagedUsers(fetchFn);
+
+		expect(result.users[0]).toMatchObject({
+			id: ADMIN_ID,
+			title: 'Admin User',
+			isAdmin: true
+		});
+		expect(result.users.find((u) => u.id === 2001)).toMatchObject({
+			accessToken: 'token-alice'
+		});
+	});
+
 	it('shared_servers HTTP 401 → throws PlexError', async () => {
 		const fetchFn = buildFetch({
 			homeUsers: { status: 200, body: homeUsersXml([{ id: 2001, title: 'Alice' }]) },
