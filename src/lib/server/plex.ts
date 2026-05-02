@@ -270,7 +270,13 @@ export async function refreshLibrarySection(
 
 // ── plex.tv helpers ───────────────────────────────────────────────────────────
 
-/** Pull every attribute from a tag's first occurrence into a flat object. */
+/**
+ * Pull every attribute from each occurrence of `<tagName ...>` into a flat
+ * object. Attribute names allow any characters that XML 1.0 permits in a
+ * Name except whitespace, `=`, `/`, `>`, and quote chars — so namespaced
+ * (`xml:lang`) and hyphenated (`data-foo`) attributes are captured too.
+ * Values are read from double-quoted strings only (Plex always uses those).
+ */
 function parseXmlAttributes(xml: string, tagName: string): Array<Record<string, string>> {
 	const result: Array<Record<string, string>> = [];
 	const tagRegex = new RegExp(
@@ -280,7 +286,7 @@ function parseXmlAttributes(xml: string, tagName: string): Array<Record<string, 
 	for (const m of xml.matchAll(tagRegex)) {
 		const attrText = m[1] ?? m[2] ?? '';
 		const attrs: Record<string, string> = {};
-		for (const am of attrText.matchAll(/(\w+)="([^"]*)"/g)) {
+		for (const am of attrText.matchAll(/([^\s=/>"']+)="([^"]*)"/g)) {
 			attrs[am[1]] = am[2];
 		}
 		result.push(attrs);
@@ -302,8 +308,22 @@ async function plexTvGet(
 }
 
 /**
+ * Result of querying the shared_servers endpoint. Carries enough context
+ * for the caller to distinguish "this user isn't shared" from "the response
+ * shape changed and we parsed nothing usable".
+ */
+interface SharedServerLookup {
+	/** userID → accessToken. Only contains entries where both fields parsed. */
+	tokens: Map<number, string>;
+	/** Number of <SharedServer> elements we saw in the response, valid or not. */
+	rawElementCount: number;
+	/** Entries that had a SharedServer element but missing/unparseable userID or accessToken. */
+	malformedCount: number;
+}
+
+/**
  * Fetch the per-server access tokens for every user with whom this server
- * is shared. Returns Map<plexUserId, accessToken>.
+ * is shared.
  *
  * Endpoint: GET https://plex.tv/api/servers/{machineId}/shared_servers
  * (this is what python-plexapi's MyPlexUser.get_token reads).
@@ -314,7 +334,7 @@ async function getSharedServerTokens(
 	machineId: string,
 	adminToken: string,
 	fn: FetchFn
-): Promise<Map<number, string>> {
+): Promise<SharedServerLookup> {
 	const url = `https://plex.tv/api/servers/${machineId}/shared_servers`;
 	const { status, text } = await plexTvGet(url, adminToken, fn);
 	if (status !== 200) {
@@ -325,15 +345,19 @@ async function getSharedServerTokens(
 		);
 	}
 
-	const map = new Map<number, string>();
-	for (const attrs of parseXmlAttributes(text, 'SharedServer')) {
+	const tokens = new Map<number, string>();
+	let malformedCount = 0;
+	const elements = parseXmlAttributes(text, 'SharedServer');
+	for (const attrs of elements) {
 		const userId = attrs.userID ? parseInt(attrs.userID, 10) : NaN;
 		const token = attrs.accessToken;
 		if (!Number.isNaN(userId) && token) {
-			map.set(userId, token);
+			tokens.set(userId, token);
+		} else {
+			malformedCount++;
 		}
 	}
-	return map;
+	return { tokens, rawElementCount: elements.length, malformedCount };
 }
 
 interface AdminAccount {
@@ -439,6 +463,10 @@ export async function getManagedUsers(
 
 	// Step 2: shared_servers token map.
 	const shared = await getSharedServerTokens(machineId, config.adminToken, fn);
+	console.log(
+		`[plex] shared_servers: ${shared.tokens.size} valid token(s), ` +
+			`${shared.rawElementCount} <SharedServer> element(s), ${shared.malformedCount} malformed`
+	);
 
 	// Step 3: admin account (so the owner can be mapped too).
 	const admin = await getAdminAccount(config.adminToken, fn);
@@ -455,22 +483,61 @@ export async function getManagedUsers(
 		isAdmin: true
 	});
 
+	const knownUserIds = [...shared.tokens.keys()];
+
 	for (const u of homeUsers) {
 		if (u.id === admin.id) continue; // already added as admin
-		const token = shared.get(u.id);
+		const token = shared.tokens.get(u.id);
 		if (token) {
 			users.push({ id: u.id, title: u.title, accessToken: token });
-		} else {
-			failures.push({
-				id: u.id,
-				title: u.title,
-				reason:
-					'No library shared with this user on this server. Share at least one library section in Plex, then refresh.'
-			});
+			continue;
 		}
+		failures.push({
+			id: u.id,
+			title: u.title,
+			reason: explainMissingShare(u.id, shared, knownUserIds)
+		});
 	}
 
 	return { users, failures };
+}
+
+/**
+ * Build a context-rich reason for why a home user has no shared_servers
+ * entry. Distinguishes "nobody is shared", "shape changed / parse failed",
+ * and "this user specifically isn't in the share list".
+ */
+function explainMissingShare(
+	userId: number,
+	shared: SharedServerLookup,
+	knownUserIds: number[]
+): string {
+	if (shared.rawElementCount === 0) {
+		return (
+			`No <SharedServer> entries returned by plex.tv shared_servers — ` +
+			`either no users are shared with this server, or the response shape changed. ` +
+			`Verify in Plex → Settings → Users & Sharing that this user has at least one library section shared.`
+		);
+	}
+	if (shared.tokens.size === 0 && shared.malformedCount > 0) {
+		return (
+			`shared_servers returned ${shared.malformedCount} entry/entries but none had ` +
+			`both userID and accessToken — likely a Plex response-shape change. ` +
+			`Check the server logs for the raw XML.`
+		);
+	}
+	const sample = knownUserIds.slice(0, 5).join(', ');
+	const suffix =
+		knownUserIds.length > 5 ? `, … (+${knownUserIds.length - 5} more)` : '';
+	const malformedNote =
+		shared.malformedCount > 0
+			? ` (${shared.malformedCount} malformed entry/entries also seen)`
+			: '';
+	return (
+		`No shared_servers entry for userID ${userId}. ` +
+		`Library is shared with ${shared.tokens.size} other user(s) [${sample}${suffix}]${malformedNote}. ` +
+		`Share a library section with this user in Plex, then refresh.`
+	);
 }
 
 /**
@@ -501,10 +568,14 @@ export async function getUserAccessToken(
 			config.adminToken,
 			fn
 		);
-		const token = shared.get(plexUserId);
+		const token = shared.tokens.get(plexUserId);
 		if (!token) {
+			const knownUserIds = [...shared.tokens.keys()];
 			console.error(
-				`[plex] getUserAccessToken: no shared_servers entry for user ${plexUserId}`
+				`[plex] getUserAccessToken: no shared_servers entry for user ${plexUserId}. ` +
+					`Saw ${shared.rawElementCount} <SharedServer> element(s), ` +
+					`${shared.tokens.size} valid token(s) [${knownUserIds.slice(0, 10).join(', ')}], ` +
+					`${shared.malformedCount} malformed.`
 			);
 			return null;
 		}

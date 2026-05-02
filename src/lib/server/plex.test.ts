@@ -183,7 +183,57 @@ describe('getManagedUsers()', () => {
 		expect(result.users.find((u) => u.id === 2002)).toBeUndefined();
 		expect(result.failures).toHaveLength(1);
 		expect(result.failures[0]).toMatchObject({ id: 2002, title: 'Bob' });
-		expect(result.failures[0].reason).toMatch(/library/i);
+		// Reason should name both the missing user and the user that does have access.
+		expect(result.failures[0].reason).toMatch(/2002/);
+		expect(result.failures[0].reason).toMatch(/2001/);
+	});
+
+	it('shared_servers returns zero elements — failure reason calls out shape/no-shares', async () => {
+		const fetchFn = buildFetch({
+			homeUsers: { status: 200, body: homeUsersXml([{ id: 2001, title: 'Alice' }]) },
+			sharedServers: { status: 200, body: '<MediaContainer></MediaContainer>' }
+		});
+
+		const result = await getManagedUsers(fetchFn);
+
+		expect(result.failures).toHaveLength(1);
+		expect(result.failures[0].reason).toMatch(/no <SharedServer> entries/i);
+	});
+
+	it('shared_servers entries are all malformed — failure reason flags shape change', async () => {
+		const fetchFn = buildFetch({
+			homeUsers: { status: 200, body: homeUsersXml([{ id: 2001, title: 'Alice' }]) },
+			sharedServers: {
+				status: 200,
+				body: '<MediaContainer><SharedServer foo="bar" /></MediaContainer>'
+			}
+		});
+
+		const result = await getManagedUsers(fetchFn);
+
+		expect(result.failures).toHaveLength(1);
+		expect(result.failures[0].reason).toMatch(/shape change/i);
+	});
+
+	it('parseXmlAttributes captures hyphenated and namespaced attribute names', async () => {
+		// Regression smoke test for the broader attribute regex: a SharedServer
+		// with xml:lang and data-foo attributes still yields a usable token.
+		const fetchFn = buildFetch({
+			homeUsers: { status: 200, body: homeUsersXml([{ id: 2001, title: 'Alice' }]) },
+			sharedServers: {
+				status: 200,
+				body:
+					'<MediaContainer>' +
+					'<SharedServer xml:lang="en" data-foo="x" userID="2001" accessToken="tok-alice" />' +
+					'</MediaContainer>'
+			}
+		});
+
+		const result = await getManagedUsers(fetchFn);
+
+		expect(result.users.find((u) => u.id === 2001)).toMatchObject({
+			accessToken: 'tok-alice'
+		});
 	});
 
 	it('admin appears in home_users too — not duplicated, listed once with admin token', async () => {
