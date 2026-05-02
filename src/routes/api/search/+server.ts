@@ -1,6 +1,7 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { searchArtist, searchAlbum, searchTrack, buildQuery } from '$lib/server/musicbrainz';
+import { searchArtist, searchAlbum, searchTrack, buildQuery, appendTrackFilters } from '$lib/server/musicbrainz';
+import { resolveCanonicalAlbumCached, recordingPenalty } from '$lib/server/canonicalAlbum';
 import { listArtists, getAlbums } from '$lib/server/lidarr';
 import { getDb } from '$lib/server/db';
 
@@ -76,25 +77,45 @@ export const GET: RequestHandler = async ({ url }) => {
 			if (artistFilter) fields['artist'] = artistFilter;
 			if (albumFilter) fields['release'] = albumFilter;
 			query = buildQuery(fields);
-			const arr = await searchTrack(query);
-			results = arr.map((a) => {
-				const artistName = a['artist-credit']?.[0]?.artist?.name ?? 'Unknown Artist';
-				const artistMbid = a['artist-credit']?.[0]?.artist?.id ?? null;
-				const albumName = a.releases?.[0]?.title ?? null;
-				const durationMs = a.length ?? null;
-				return {
-					mbid: a.id,
-					type: 'track',
-					title: a.title,
-					artist: artistName,
-					artistMbid,
-					album: albumName,
-					durationMs,
-					score: a.score ?? 0,
-					inLidarr: false,
-					listMemberships: []
-				};
+
+			const strict = appendTrackFilters(query);
+			let arr = await searchTrack(strict);
+			if (arr.length === 0) {
+				arr = await searchTrack(query);
+			}
+
+			const decorated = arr.map((rec) => ({
+				rec,
+				canonical: resolveCanonicalAlbumCached(rec),
+				penalty: recordingPenalty(rec)
+			}));
+
+			decorated.sort((a, b) => {
+				const tA = a.canonical?.tier ?? 5;
+				const tB = b.canonical?.tier ?? 5;
+				if (tA !== tB) return tA - tB;
+				if (a.penalty !== b.penalty) return a.penalty - b.penalty;
+				const sA = a.rec.score ?? 0;
+				const sB = b.rec.score ?? 0;
+				if (sA !== sB) return sB - sA;
+				return (a.canonical?.year ?? '9999').localeCompare(b.canonical?.year ?? '9999');
 			});
+
+			results = decorated.map(({ rec, canonical }) => ({
+				mbid: rec.id,
+				type: 'track',
+				title: rec.title,
+				artist: rec['artist-credit']?.[0]?.artist?.name ?? 'Unknown Artist',
+				artistMbid: rec['artist-credit']?.[0]?.artist?.id ?? null,
+				album: canonical?.title ?? rec.releases?.[0]?.title ?? null,
+				albumMbid: canonical?.releaseGroupMbid ?? null,
+				year: canonical?.year ?? null,
+				tier: canonical?.tier ?? null,
+				durationMs: rec.length ?? null,
+				score: rec.score ?? 0,
+				inLidarr: false,
+				listMemberships: []
+			}));
 			mbids = results.map((r) => r.mbid);
 		}
 

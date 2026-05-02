@@ -132,6 +132,17 @@ CREATE TABLE IF NOT EXISTS plex_playlists (
 );
 CREATE INDEX IF NOT EXISTS idx_plex_playlists_list ON plex_playlists(list_id);
 
+-- Caches the resolved canonical release-group for each MusicBrainz recording.
+-- No TTL: MB metadata for original albums rarely changes.
+CREATE TABLE IF NOT EXISTS canonical_album_cache (
+  recording_mbid      TEXT PRIMARY KEY,
+  release_group_mbid  TEXT NOT NULL,
+  release_group_title TEXT NOT NULL,
+  year                TEXT,
+  tier                INTEGER NOT NULL,
+  cached_at           INTEGER NOT NULL  -- unix seconds
+);
+
 -- Tracks which list items have been successfully synced to which Plex playlists.
 -- Stores the Plex ratingKey so subsequent syncs skip already-added tracks,
 -- and the playlistItemID so items can be surgically removed.
