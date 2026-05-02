@@ -19,8 +19,7 @@ import {
 	searchTrack,
 	createPlaylist,
 	addToPlaylist,
-	getPlaylistItems,
-	getFreshUserToken,
+	getUserAccessToken,
 	PlexError
 } from './plex';
 import { decrypt, isEncrypted } from './crypto';
@@ -99,8 +98,7 @@ export async function syncListToPlexPlaylist(
 		throw new Error(`plex_playlists row ${plexPlaylistDbId} not found`);
 	}
 
-	// Decrypt the stored token -- it may be plaintext (legacy) or encrypted.
-	// This is the fallback; we try to get a fresh token from plex.tv below.
+	// Stored token is a fallback for legacy mappings that have no plex_user_id.
 	const storedToken = resolveToken(row.plex_user_token);
 
 	// Look up the library_section_id and plex_user_id via root_folder_path.
@@ -108,20 +106,26 @@ export async function syncListToPlexPlaylist(
 		.prepare('SELECT library_section_id, plex_user_id FROM plex_user_mappings WHERE root_folder_path = ?')
 		.get(row.list_root_folder_path) as (PlexUserMappingRow & { library_section_id: string }) | undefined;
 
-	// Attempt to get a fresh switch token from plex.tv immediately before playlist
-	// operations. The switch token is short-lived; the stored DB token may be stale.
-	// Falls back to the stored token if the refresh fails.
+	// Resolve the per-server access token via plex.tv shared_servers (or admin
+	// token if the mapped user is the server owner). This is the canonical
+	// per-user, per-server token path — see PLEX_REVIEW.md §10 and the
+	// python-plexapi MyPlexUser.get_token reference.
 	let plexToken = storedToken;
 	if (userMapping?.plex_user_id) {
-		const fresh = await getFreshUserToken(userMapping.plex_user_id);
+		const fresh = await getUserAccessToken(userMapping.plex_user_id);
 		if (fresh) {
-			console.log(`[plex-sync] Got fresh token for user ID ${userMapping.plex_user_id}`);
 			plexToken = fresh;
 		} else {
-			console.warn(`[plex-sync] Could not get fresh token for user ID ${userMapping.plex_user_id}, using stored token`);
+			console.warn(
+				`[plex-sync] Could not resolve access token for user ID ${userMapping.plex_user_id} ` +
+				`(no library shared, or plex.tv error). Falling back to stored token.`
+			);
 		}
 	} else {
-		console.warn(`[plex-sync] No plex_user_id stored for this mapping — using stored token. Re-save the mapping in Settings to fix this.`);
+		console.warn(
+			`[plex-sync] No plex_user_id stored for this mapping — falling back to stored token. ` +
+			`Re-save the mapping in Settings to enable shared_servers token lookup.`
+		);
 	}
 
 	const librarySectionId = userMapping?.library_section_id ?? '';

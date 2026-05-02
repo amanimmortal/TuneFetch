@@ -1,14 +1,22 @@
 /**
  * Plex Media Server API client.
  *
- * Follows the same pattern as the existing `lidarr.ts`:
- * - Reads config from the settings table at call time.
- * - Applies a 15-second timeout per request.
- * - Throws PlexError on non-2xx responses or network failures.
+ * Token model (mirrors python-plexapi):
+ *   - Admin token: stored in settings as PLEX_ADMIN_TOKEN. Used for all
+ *     server-level operations (identity, sections, sync triggers) and for
+ *     playlist operations performed AS the server owner.
+ *   - Per-user token: obtained from
+ *       GET https://plex.tv/api/servers/{machineId}/shared_servers
+ *     which is the canonical, server-scoped accessToken for each user
+ *     who has been granted library access. These tokens are accepted by
+ *     the local PMS for that user's playlists, library views, etc.
  *
- * Authentication: Plex uses `X-Plex-Token` header. The admin token is used
- * for server-level operations; per-user tokens are required for creating
- * playlists "as" a specific managed user.
+ * What we deliberately do NOT do anymore:
+ *   - POST /api/home/users/{id}/switch — returns a plex.tv cloud session
+ *     token that the local PMS rejects.
+ *   - POST /users/sign_in.json — exchanges one cloud token for another
+ *     cloud token; still not accepted by the local PMS.
+ *   These were attempted in earlier iterations (see PLEX_REVIEW.md §10).
  */
 
 import { getSetting, SETTING_KEYS } from './settings';
@@ -26,10 +34,6 @@ export class PlexError extends Error {
 	}
 }
 
-/**
- * Walk the cause chain of a fetch failure into a readable string.
- * (Same utility as lidarr.ts.)
- */
 function describeFetchError(err: unknown): string {
 	const parts: string[] = [];
 	let node: unknown = err;
@@ -55,7 +59,6 @@ export interface PlexConfig {
 	adminToken: string;
 }
 
-/** Read and validate Plex config from settings. Throws PlexError if unset. */
 function readConfig(): PlexConfig {
 	const baseUrl = getSetting(SETTING_KEYS.PLEX_URL);
 	const adminToken = getSetting(SETTING_KEYS.PLEX_ADMIN_TOKEN);
@@ -69,7 +72,6 @@ function readConfig(): PlexConfig {
 
 // ── Response types ────────────────────────────────────────────────────────────
 
-/** Top-level identity response from GET / */
 export interface PlexIdentity {
 	machineIdentifier: string;
 	version: string;
@@ -77,50 +79,44 @@ export interface PlexIdentity {
 	[key: string]: unknown;
 }
 
-/** A library section (e.g. Music, Movies). */
 export interface PlexLibrarySection {
 	key: string;
 	title: string;
 	type: string;
-	/** The agent used for this library (e.g. 'tv.plex.agents.music'). */
 	agent?: string;
 	[key: string]: unknown;
 }
 
-/** A managed/home user from plex.tv. */
 export interface PlexManagedUser {
 	id: number;
-	title: string; // display name
+	title: string;
 	username?: string;
-	/** Per-server access token for this user. */
 	accessToken: string;
+	/** True for the server owner (admin token). */
+	isAdmin?: boolean;
 	[key: string]: unknown;
 }
 
-/** A user whose token could not be retrieved in Step 2 of getManagedUsers(). */
 export interface PlexManagedUserFailure {
 	id: number;
 	title: string;
 	reason: string;
 }
 
-/** Return value of getManagedUsers(). */
 export interface GetManagedUsersResult {
 	users: PlexManagedUser[];
 	failures: PlexManagedUserFailure[];
 }
 
-/** A track result from a Plex library search. */
 export interface PlexTrack {
 	ratingKey: string;
 	title: string;
-	grandparentTitle?: string; // artist name
-	parentTitle?: string; // album name
+	grandparentTitle?: string;
+	parentTitle?: string;
 	type: string;
 	[key: string]: unknown;
 }
 
-/** A Plex playlist. */
 export interface PlexPlaylist {
 	ratingKey: string;
 	title: string;
@@ -130,7 +126,6 @@ export interface PlexPlaylist {
 	[key: string]: unknown;
 }
 
-/** A playlist item with its playlistItemID (needed for removal). */
 export interface PlexPlaylistItem {
 	ratingKey: string;
 	title: string;
@@ -144,15 +139,23 @@ export interface PlexPlaylistItem {
 
 type FetchFn = typeof fetch;
 
-/** Plex client identifier — identifies TuneFetch as the connecting app. */
 const PLEX_CLIENT_ID = 'tunefetch';
 const PLEX_PRODUCT = 'TuneFetch';
 
+/** Standard X-Plex-* headers sent on every request. */
+function plexHeaders(token: string, extra: Record<string, string> = {}): Record<string, string> {
+	return {
+		'X-Plex-Token': token,
+		'X-Plex-Client-Identifier': PLEX_CLIENT_ID,
+		'X-Plex-Product': PLEX_PRODUCT,
+		...extra
+	};
+}
+
 /**
  * Internal fetch wrapper for local PMS requests.
- * - Injects X-Plex-Token header.
+ * - Injects X-Plex-Token + identifier headers.
  * - Applies a 15-second timeout.
- * - Requests JSON responses.
  * - Throws PlexError on non-2xx or network failures.
  */
 async function request<T>(
@@ -162,16 +165,17 @@ async function request<T>(
 		token?: string;
 		body?: unknown;
 		fetchFn?: FetchFn;
-		/** If true, read config; if false, use provided base URL. */
 		baseUrl?: string;
-		/** Query params to append. */
 		params?: Record<string, string>;
+		/** 'json' (default) or 'xml'. */
+		accept?: 'json' | 'xml';
 	} = {}
 ): Promise<T> {
 	const config = options.baseUrl ? null : readConfig();
 	const base = options.baseUrl ?? config!.baseUrl;
 	const token = options.token ?? config!.adminToken;
 	const fetchFn = options.fetchFn ?? fetch;
+	const accept = options.accept ?? 'json';
 
 	let url = `${base}${path}`;
 	if (options.params) {
@@ -179,13 +183,12 @@ async function request<T>(
 		url += (url.includes('?') ? '&' : '?') + qs;
 	}
 
-	const headers: Record<string, string> = {
-		'X-Plex-Token': token,
-		'X-Plex-Client-Identifier': PLEX_CLIENT_ID,
-		'X-Plex-Product': PLEX_PRODUCT,
-		Accept: 'application/json',
-		'Content-Type': 'application/json'
-	};
+	const headers = plexHeaders(token, {
+		Accept: accept === 'json' ? 'application/json' : 'application/xml'
+	});
+	if (options.body !== undefined) {
+		headers['Content-Type'] = 'application/json';
+	}
 
 	let response: Response;
 	try {
@@ -220,7 +223,11 @@ async function request<T>(
 	}
 
 	if (!text.trim()) {
-		return {} as T; // Some Plex endpoints return empty body on success
+		return {} as T;
+	}
+
+	if (accept === 'xml') {
+		return text as unknown as T;
 	}
 
 	try {
@@ -236,7 +243,6 @@ async function request<T>(
 
 // ── Public API — Server ───────────────────────────────────────────────────────
 
-/** Test connectivity by fetching the server identity. */
 export async function testConnection(fetchFn?: FetchFn): Promise<PlexIdentity> {
 	const raw = await request<{ MediaContainer: PlexIdentity }>(
 		'GET',
@@ -246,7 +252,6 @@ export async function testConnection(fetchFn?: FetchFn): Promise<PlexIdentity> {
 	return raw.MediaContainer;
 }
 
-/** List all library sections. Used to let users pick a music library. */
 export async function getLibrarySections(
 	fetchFn?: FetchFn
 ): Promise<PlexLibrarySection[]> {
@@ -256,7 +261,6 @@ export async function getLibrarySections(
 	return raw.MediaContainer.Directory ?? [];
 }
 
-/** Trigger a library section scan so newly downloaded files are indexed. */
 export async function refreshLibrarySection(
 	sectionId: string,
 	fetchFn?: FetchFn
@@ -264,15 +268,164 @@ export async function refreshLibrarySection(
 	await request('GET', `/library/sections/${sectionId}/refresh`, { fetchFn });
 }
 
+// ── plex.tv helpers ───────────────────────────────────────────────────────────
+
+/**
+ * Pull every attribute from each occurrence of `<tagName ...>` into a flat
+ * object. Attribute names allow any characters that XML 1.0 permits in a
+ * Name except whitespace, `=`, `/`, `>`, and quote chars — so namespaced
+ * (`xml:lang`) and hyphenated (`data-foo`) attributes are captured too.
+ * Values are read from double-quoted strings only (Plex always uses those).
+ */
+function parseXmlAttributes(xml: string, tagName: string): Array<Record<string, string>> {
+	const result: Array<Record<string, string>> = [];
+	const tagRegex = new RegExp(
+		`<${tagName}\\s([^>]*?)/?>|<${tagName}\\s([^>]*?)>`,
+		'g'
+	);
+	for (const m of xml.matchAll(tagRegex)) {
+		const attrText = m[1] ?? m[2] ?? '';
+		const attrs: Record<string, string> = {};
+		for (const am of attrText.matchAll(/([^\s=/>"']+)="([^"]*)"/g)) {
+			attrs[am[1]] = am[2];
+		}
+		result.push(attrs);
+	}
+	return result;
+}
+
+async function plexTvGet(
+	url: string,
+	adminToken: string,
+	fn: FetchFn
+): Promise<{ status: number; text: string }> {
+	const resp = await fn(url, {
+		method: 'GET',
+		headers: plexHeaders(adminToken),
+		signal: AbortSignal.timeout(15_000)
+	});
+	return { status: resp.status, text: await resp.text() };
+}
+
+/**
+ * Result of querying the shared_servers endpoint. Carries enough context
+ * for the caller to distinguish "this user isn't shared" from "the response
+ * shape changed and we parsed nothing usable".
+ */
+interface SharedServerLookup {
+	/** userID → accessToken. Only contains entries where both fields parsed. */
+	tokens: Map<number, string>;
+	/** Number of <SharedServer> elements we saw in the response, valid or not. */
+	rawElementCount: number;
+	/** Entries that had a SharedServer element but missing/unparseable userID or accessToken. */
+	malformedCount: number;
+}
+
+/**
+ * Fetch the per-server access tokens for every user with whom this server
+ * is shared.
+ *
+ * Endpoint: GET https://plex.tv/api/servers/{machineId}/shared_servers
+ * (this is what python-plexapi's MyPlexUser.get_token reads).
+ *
+ * The admin/owner does NOT appear here — they don't share with themselves.
+ */
+async function getSharedServerTokens(
+	machineId: string,
+	adminToken: string,
+	fn: FetchFn
+): Promise<SharedServerLookup> {
+	const url = `https://plex.tv/api/servers/${machineId}/shared_servers`;
+	const { status, text } = await plexTvGet(url, adminToken, fn);
+	if (status !== 200) {
+		throw new PlexError(
+			`plex.tv returned HTTP ${status} for shared_servers`,
+			status,
+			text
+		);
+	}
+
+	const tokens = new Map<number, string>();
+	let malformedCount = 0;
+	const elements = parseXmlAttributes(text, 'SharedServer');
+	for (const attrs of elements) {
+		const userId = attrs.userID ? parseInt(attrs.userID, 10) : NaN;
+		const token = attrs.accessToken;
+		if (!Number.isNaN(userId) && token) {
+			tokens.set(userId, token);
+		} else {
+			malformedCount++;
+		}
+	}
+	return { tokens, rawElementCount: elements.length, malformedCount };
+}
+
+interface AdminAccount {
+	id: number;
+	title: string;
+	username?: string;
+}
+
+/** Identify the server owner via plex.tv. Cached. */
+let _adminAccount: AdminAccount | null = null;
+async function getAdminAccount(
+	adminToken: string,
+	fn: FetchFn
+): Promise<AdminAccount> {
+	if (_adminAccount) return _adminAccount;
+	const { status, text } = await plexTvGet(
+		'https://plex.tv/api/v2/user',
+		adminToken,
+		fn
+	);
+	if (status !== 200) {
+		throw new PlexError(
+			`plex.tv returned HTTP ${status} for /api/v2/user`,
+			status,
+			text
+		);
+	}
+	let id: number | undefined;
+	let title: string | undefined;
+	let username: string | undefined;
+	try {
+		const json = JSON.parse(text) as {
+			id?: number;
+			title?: string;
+			username?: string;
+			friendlyName?: string;
+		};
+		id = json.id;
+		title = json.title ?? json.friendlyName ?? json.username;
+		username = json.username;
+	} catch {
+		// /api/v2/user returns JSON; if not, surface as a config issue.
+		throw new PlexError(
+			'plex.tv /api/v2/user returned non-JSON response',
+			status,
+			text.slice(0, 300)
+		);
+	}
+	if (!id) {
+		throw new PlexError(
+			'plex.tv /api/v2/user response missing id field',
+			status,
+			text.slice(0, 300)
+		);
+	}
+	_adminAccount = { id, title: title ?? `Admin (${id})`, username };
+	return _adminAccount;
+}
+
 // ── Public API — Managed Users ────────────────────────────────────────────────
 
 /**
- * Enumerate managed/home users and their per-server access tokens.
+ * Enumerate the users who can be mapped to root folders in TuneFetch:
+ *   - The server owner (admin), with their admin token.
+ *   - Every Plex Home user who has library access on this server, with the
+ *     per-server accessToken from /api/servers/{machineId}/shared_servers.
  *
- * Calls the plex.tv API (not the local PMS) to get shared servers,
- * then extracts the user list with their tokens.
- *
- * Note: This is a plex.tv cloud call, not a local PMS call.
+ * Home users without any library shared with them are returned in `failures`.
  */
 export async function getManagedUsers(
 	fetchFn?: FetchFn
@@ -280,161 +433,124 @@ export async function getManagedUsers(
 	const config = readConfig();
 	const fn = fetchFn ?? fetch;
 
-	// ── Step 1: List home users from plex.tv ─────────────────────────────────
-	// NOTE: Must use /api/home/users (NOT /api/v2/home/users).
-	// The v2 endpoint returns a different structure and the switch endpoint lives under v1.
-	// Response is XML — parse the User elements.
-	let usersResponse: Response;
-	try {
-		usersResponse = await fn('https://plex.tv/api/home/users', {
-			method: 'GET',
-			headers: {
-				'X-Plex-Token': config.adminToken,
-				'X-Plex-Client-Identifier': PLEX_CLIENT_ID,
-				'X-Plex-Product': PLEX_PRODUCT
-				// No Accept: application/json — this endpoint returns XML
-			},
-			signal: AbortSignal.timeout(15_000)
-		});
-	} catch (err: unknown) {
-		throw new PlexError(`Network error fetching managed users: ${describeFetchError(err)}`);
-	}
+	// Identity gives us the machine identifier needed for shared_servers.
+	const identity = await testConnection(fn);
+	const machineId = identity.machineIdentifier;
 
-	if (!usersResponse.ok) {
+	// Step 1: Home users (for friendly names + ids).
+	const { status: huStatus, text: huText } = await plexTvGet(
+		'https://plex.tv/api/home/users',
+		config.adminToken,
+		fn
+	);
+	if (huStatus !== 200) {
 		throw new PlexError(
-			`plex.tv returned HTTP ${usersResponse.status} for managed users`,
-			usersResponse.status,
-			await usersResponse.text()
+			`plex.tv returned HTTP ${huStatus} for /api/home/users`,
+			huStatus,
+			huText
 		);
 	}
 
-	// Parse the XML response to extract User elements (attribute order-independent)
-	const xmlText = await usersResponse.text();
-	const userElementMatches = [...xmlText.matchAll(/<User\s([^>]*)\/?>|<User\s([^>]*)>[\s\S]*?<\/User>/g)];
-
-	const userList: Array<{ id: number; title: string }> = [];
-	for (const m of userElementMatches) {
-		const attrs = m[1] ?? m[2] ?? '';
-		const idMatch = attrs.match(/\bid="(\d+)"/);
-		const titleMatch = attrs.match(/\btitle="([^"]*)"/);  
-		if (idMatch && titleMatch) {
-			userList.push({ id: parseInt(idMatch[1], 10), title: titleMatch[1] });
+	const homeUsers: Array<{ id: number; title: string }> = [];
+	for (const attrs of parseXmlAttributes(huText, 'User')) {
+		const id = attrs.id ? parseInt(attrs.id, 10) : NaN;
+		const title = attrs.title ?? '';
+		if (!Number.isNaN(id) && title) {
+			homeUsers.push({ id, title });
 		}
 	}
+	console.log(`[plex] Found ${homeUsers.length} home user(s) from plex.tv`);
 
-	console.log(`[plex] Found ${userList.length} home user(s) from plex.tv`);
+	// Step 2: shared_servers token map.
+	const shared = await getSharedServerTokens(machineId, config.adminToken, fn);
+	console.log(
+		`[plex] shared_servers: ${shared.tokens.size} valid token(s), ` +
+			`${shared.rawElementCount} <SharedServer> element(s), ${shared.malformedCount} malformed`
+	);
 
-	if (userList.length === 0) {
-		console.warn('[plex] No users parsed from /api/home/users XML. Raw (first 500 chars):', xmlText.substring(0, 500));
-	}
+	// Step 3: admin account (so the owner can be mapped too).
+	const admin = await getAdminAccount(config.adminToken, fn);
 
-	// ── Step 2: Get per-user tokens ──────────────────────────────────────────────
-	// Attempts so far (all failed — see PLEX_REVIEW.md §10):
-	//   - plex.tv /api/home/users/{id}/switch → cloud token, local PMS returns 401
-	//   - local PMS /home/users/{id}/switch   → 404, endpoint does not exist
-	//
-	// Current attempt: GET {localPms}/home/users to see if locally-valid tokens
-	// are embedded in the home user list. Logs the full raw response so we can
-	// inspect the shape regardless of outcome.
-
-	// ── Step 2a: Diagnostic — try local PMS managed user auth endpoints ─────
-	// All plex.tv switch tokens return 401 on the local PMS.
-	// Trying local PMS endpoint variations to find one that returns a local token.
-	{
-		const headers = {
-			'X-Plex-Token': config.adminToken,
-			'X-Plex-Client-Identifier': PLEX_CLIENT_ID,
-			'X-Plex-Product': PLEX_PRODUCT,
-			Accept: 'application/json'
-		};
-		// Try POST /home/users/switch with user ID in body (older Plex versions)
-		for (const userId of userList.map(u => u.id)) {
-			const user = userList.find(u => u.id === userId)!;
-			const variants = [
-				{ url: `${config.baseUrl}/home/users/switch`, method: 'POST', body: `id=${userId}` },
-				{ url: `${config.baseUrl}/api/home/users/${userId}/switch`, method: 'POST', body: undefined },
-				{ url: `${config.baseUrl}/home/users/${userId}`, method: 'POST', body: undefined },
-			];
-			for (const v of variants) {
-				try {
-					const resp = await fn(v.url, {
-						method: v.method,
-						headers: v.body
-							? { ...headers, 'Content-Type': 'application/x-www-form-urlencoded' }
-							: headers,
-						body: v.body,
-						signal: AbortSignal.timeout(8_000)
-					});
-					const text = await resp.text();
-					console.log(`[plex] ${v.method} ${v.url} (user ${user.title}) → HTTP ${resp.status}, body (first 200): ${text.substring(0, 200)}`);
-				} catch (err) {
-					console.log(`[plex] ${v.method} ${v.url} → error: ${describeFetchError(err)}`);
-				}
-			}
-			break; // Only test against first user — enough to see what works
-		}
-	}
-
-	// ── Step 2b: Fall back to plex.tv switch (known to return cloud tokens) ───
-	// These tokens get 401 on the local PMS but we still return them so the
-	// Settings UI populates; swap this out once we find a working token source.
 	const users: PlexManagedUser[] = [];
 	const failures: PlexManagedUserFailure[] = [];
 
-	for (const user of userList) {
-		try {
-			const switchUrl = `https://plex.tv/api/home/users/${user.id}/switch`;
-			const switchResponse = await fn(switchUrl, {
-				method: 'POST',
-				headers: {
-					'X-Plex-Token': config.adminToken,
-					'X-Plex-Client-Identifier': PLEX_CLIENT_ID,
-					'X-Plex-Product': PLEX_PRODUCT
-				},
-				signal: AbortSignal.timeout(15_000)
-			});
+	// Always include the admin first.
+	users.push({
+		id: admin.id,
+		title: admin.title,
+		username: admin.username,
+		accessToken: config.adminToken,
+		isAdmin: true
+	});
 
-			const switchText = await switchResponse.text();
+	const knownUserIds = [...shared.tokens.keys()];
 
-			if (!switchResponse.ok) {
-				const reason = `plex.tv switch HTTP ${switchResponse.status}: ${switchText.substring(0, 200)}`;
-				console.error(`[plex] ${reason}`);
-				failures.push({ id: user.id, title: user.title, reason });
-				continue;
-			}
-
-			// Parse authenticationToken from XML
-			const token = switchText.match(/authenticationToken="([^"]+)"/)?.[1];
-			if (token) {
-				users.push({ id: user.id, title: user.title, accessToken: token });
-			} else {
-				const reason = `Switch succeeded but no authenticationToken in XML. Body (first 300): ${switchText.substring(0, 300)}`;
-				console.error(`[plex] ${reason}`);
-				failures.push({ id: user.id, title: user.title, reason });
-			}
-		} catch (err) {
-			const reason = describeFetchError(err);
-			console.error(`[plex] Exception switching to user "${user.title}": ${reason}`);
-			failures.push({ id: user.id, title: user.title, reason });
+	for (const u of homeUsers) {
+		if (u.id === admin.id) continue; // already added as admin
+		const token = shared.tokens.get(u.id);
+		if (token) {
+			users.push({ id: u.id, title: u.title, accessToken: token });
+			continue;
 		}
+		failures.push({
+			id: u.id,
+			title: u.title,
+			reason: explainMissingShare(u.id, shared, knownUserIds)
+		});
 	}
 
 	return { users, failures };
 }
 
-// ── Public API — Fresh user token ────────────────────────────────────────────
+/**
+ * Build a context-rich reason for why a home user has no shared_servers
+ * entry. Distinguishes "nobody is shared", "shape changed / parse failed",
+ * and "this user specifically isn't in the share list".
+ */
+function explainMissingShare(
+	userId: number,
+	shared: SharedServerLookup,
+	knownUserIds: number[]
+): string {
+	if (shared.rawElementCount === 0) {
+		return (
+			`No <SharedServer> entries returned by plex.tv shared_servers — ` +
+			`either no users are shared with this server, or the response shape changed. ` +
+			`Verify in Plex → Settings → Users & Sharing that this user has at least one library section shared.`
+		);
+	}
+	if (shared.tokens.size === 0 && shared.malformedCount > 0) {
+		return (
+			`shared_servers returned ${shared.malformedCount} entry/entries but none had ` +
+			`both userID and accessToken — likely a Plex response-shape change. ` +
+			`Check the server logs for the raw XML.`
+		);
+	}
+	const sample = knownUserIds.slice(0, 5).join(', ');
+	const suffix =
+		knownUserIds.length > 5 ? `, … (+${knownUserIds.length - 5} more)` : '';
+	const malformedNote =
+		shared.malformedCount > 0
+			? ` (${shared.malformedCount} malformed entry/entries also seen)`
+			: '';
+	return (
+		`No shared_servers entry for userID ${userId}. ` +
+		`Library is shared with ${shared.tokens.size} other user(s) [${sample}${suffix}]${malformedNote}. ` +
+		`Share a library section with this user in Plex, then refresh.`
+	);
+}
 
 /**
- * Fetch a fresh switch token for a managed/home user from plex.tv.
+ * Return a token usable against the local PMS for the given Plex user id.
  *
- * The plex.tv switch token is short-lived. We call this immediately before
- * any playlist write operation rather than using the token stored in the DB,
- * which may have expired. Matches the user by their plex.tv user ID (passed
- * from plex_user_mappings.plex_user_id).
+ * - If the id matches the server owner, returns the admin token.
+ * - Otherwise looks up the per-server accessToken in shared_servers.
  *
- * Returns null if the user cannot be found or the switch call fails.
+ * Returns null if the user has no library access on this server (or any
+ * other plex.tv error). Caller decides whether to fall back to a stored
+ * token or surface the error.
  */
-export async function getFreshUserToken(
+export async function getUserAccessToken(
 	plexUserId: number,
 	fetchFn?: FetchFn
 ): Promise<string | null> {
@@ -442,70 +558,32 @@ export async function getFreshUserToken(
 	const fn = fetchFn ?? fetch;
 
 	try {
-		// Step 1: Get the temporary cloud switch token for this managed user.
-		const switchUrl = `https://plex.tv/api/home/users/${plexUserId}/switch`;
-		const switchResp = await fn(switchUrl, {
-			method: 'POST',
-			headers: {
-				'X-Plex-Token': config.adminToken,
-				'X-Plex-Client-Identifier': PLEX_CLIENT_ID,
-				'X-Plex-Product': PLEX_PRODUCT
-			},
-			signal: AbortSignal.timeout(15_000)
-		});
-
-		const switchText = await switchResp.text();
-		if (!switchResp.ok) {
-			console.error(`[plex] getFreshUserToken: switch HTTP ${switchResp.status} for user ${plexUserId}`);
+		const admin = await getAdminAccount(config.adminToken, fn);
+		if (plexUserId === admin.id) {
+			return config.adminToken;
+		}
+		const identity = await testConnection(fn);
+		const shared = await getSharedServerTokens(
+			identity.machineIdentifier,
+			config.adminToken,
+			fn
+		);
+		const token = shared.tokens.get(plexUserId);
+		if (!token) {
+			const knownUserIds = [...shared.tokens.keys()];
+			console.error(
+				`[plex] getUserAccessToken: no shared_servers entry for user ${plexUserId}. ` +
+					`Saw ${shared.rawElementCount} <SharedServer> element(s), ` +
+					`${shared.tokens.size} valid token(s) [${knownUserIds.slice(0, 10).join(', ')}], ` +
+					`${shared.malformedCount} malformed.`
+			);
 			return null;
 		}
-
-		const cloudToken = switchText.match(/authenticationToken="([^"]+)"/)?.[1];
-		if (!cloudToken) {
-			console.error(`[plex] getFreshUserToken: no authenticationToken in switch XML for user ${plexUserId}`);
-			return null;
-		}
-
-		// Step 2: Exchange the cloud switch token for a full session token via
-		// POST /users/sign_in.json. This is what the Plex web app does after
-		// switching users — the raw switch token is rejected by the local PMS,
-		// but the sign_in exchange returns a token that the local PMS accepts.
-		const signInResp = await fn('https://plex.tv/users/sign_in.json', {
-			method: 'POST',
-			headers: {
-				'X-Plex-Token': cloudToken,
-				'X-Plex-Client-Identifier': PLEX_CLIENT_ID,
-				'X-Plex-Product': PLEX_PRODUCT,
-				Accept: 'application/json'
-			},
-			signal: AbortSignal.timeout(15_000)
-		});
-
-		const signInText = await signInResp.text();
-		if (!signInResp.ok) {
-			console.error(`[plex] getFreshUserToken: sign_in HTTP ${signInResp.status} for user ${plexUserId}: ${signInText.substring(0, 200)}`);
-			return null;
-		}
-
-		// Response: { user: { authToken: "..." } }
-		let sessionToken: string | undefined;
-		try {
-			const json = JSON.parse(signInText);
-			sessionToken = json?.user?.authToken;
-		} catch {
-			// Try XML fallback
-			sessionToken = signInText.match(/authToken="([^"]+)"/)?.[1];
-		}
-
-		if (!sessionToken) {
-			console.error(`[plex] getFreshUserToken: no authToken in sign_in response for user ${plexUserId}. Body: ${signInText.substring(0, 300)}`);
-			return null;
-		}
-
-		console.log(`[plex] getFreshUserToken: got session token for user ${plexUserId} (length ${sessionToken.length})`);
-		return sessionToken;
+		return token;
 	} catch (err) {
-		console.error(`[plex] getFreshUserToken error for user ${plexUserId}: ${describeFetchError(err)}`);
+		console.error(
+			`[plex] getUserAccessToken error for user ${plexUserId}: ${describeFetchError(err)}`
+		);
 		return null;
 	}
 }
@@ -515,8 +593,8 @@ export async function getFreshUserToken(
 /**
  * Search for a track in the Plex library by artist name and track title.
  *
- * @param sectionId - The Plex library section ID to search within (per-user).
- * Returns the first matching track, or null if not found.
+ * Uses the admin token: ratingKeys are library-wide and identical across
+ * users, so the lookup itself can run as the owner.
  */
 export async function searchTrack(
 	artistName: string,
@@ -528,10 +606,6 @@ export async function searchTrack(
 		throw new PlexError('No Plex library section ID provided for this user mapping.');
 	}
 
-	// Search by track title within the music library section (type=10 = track).
-	// Use the admin token — managed/family user tokens from the plex.tv switch endpoint
-	// are not accepted by the local PMS for library section searches.
-	// ratingKeys are library-wide and identical regardless of which user views them.
 	const searchQuery = encodeURIComponent(trackTitle);
 	const raw = await request<{
 		MediaContainer: { Metadata?: PlexTrack[] };
@@ -546,7 +620,6 @@ export async function searchTrack(
 	const artistLower = artistName.toLowerCase();
 	const titleLower = trackTitle.toLowerCase();
 
-	// Exact match first
 	const exact = results.find(
 		(t) =>
 			t.title.toLowerCase() === titleLower &&
@@ -554,7 +627,6 @@ export async function searchTrack(
 	);
 	if (exact) return exact;
 
-	// Fuzzy: artist name contains match
 	const fuzzy = results.find(
 		(t) =>
 			t.title.toLowerCase() === titleLower &&
@@ -562,19 +634,19 @@ export async function searchTrack(
 	);
 	if (fuzzy) return fuzzy;
 
-	// Last resort: title-only match
 	return results.find((t) => t.title.toLowerCase() === titleLower) ?? null;
 }
 
 // ── Public API — Playlist CRUD ────────────────────────────────────────────────
 
 /**
- * Create a new playlist for a specific user.
+ * Create a new audio playlist for a specific user.
  *
- * @param userToken - The Plex user's access token (playlists are per-user).
- * @param title - Playlist title.
- * @param ratingKeys - Initial set of track ratingKeys to include.
- * @returns The created playlist's ratingKey (playlist ID).
+ * Sends the request the same way python-plexapi does:
+ *   POST /playlists?uri=server://{machineId}/com.plexapp.plugins.library/library/metadata/{rk1,rk2,...}
+ *        &type=audio&title={title}&smart=0
+ * with X-Plex-Token: <userToken>, no body. Response is XML; we read the
+ * ratingKey attribute from the first <Playlist> child of <MediaContainer>.
  */
 export async function createPlaylist(
 	userToken: string,
@@ -582,14 +654,16 @@ export async function createPlaylist(
 	ratingKeys: string[],
 	fetchFn?: FetchFn
 ): Promise<string> {
-	// Build the URI for the initial items (no section ID needed for playlist creation)
-	const uri = `server://${await getMachineId(fetchFn)}/com.plexapp.plugins.library/library/metadata/${ratingKeys.join(',')}`;
+	if (ratingKeys.length === 0) {
+		throw new PlexError('createPlaylist requires at least one ratingKey');
+	}
+	const machineId = await getMachineId(fetchFn);
+	const uri = `server://${machineId}/com.plexapp.plugins.library/library/metadata/${ratingKeys.join(',')}`;
 
-	const raw = await request<{
-		MediaContainer: { Metadata?: PlexPlaylist[] };
-	}>('POST', '/playlists', {
+	const xml = await request<string>('POST', '/playlists', {
 		token: userToken,
 		fetchFn,
+		accept: 'xml',
 		params: {
 			type: 'audio',
 			title,
@@ -598,35 +672,36 @@ export async function createPlaylist(
 		}
 	});
 
-	const playlist = raw.MediaContainer?.Metadata?.[0];
-	if (!playlist?.ratingKey) {
-		throw new PlexError('Playlist creation succeeded but no ratingKey returned');
+	const playlists = parseXmlAttributes(xml, 'Playlist');
+	const ratingKey = playlists[0]?.ratingKey;
+	if (!ratingKey) {
+		throw new PlexError(
+			'Playlist creation succeeded but no ratingKey returned',
+			undefined,
+			typeof xml === 'string' ? xml.slice(0, 500) : ''
+		);
 	}
-	return playlist.ratingKey;
+	return ratingKey;
 }
 
-/**
- * Add tracks to an existing playlist.
- */
 export async function addToPlaylist(
 	userToken: string,
 	playlistId: string,
 	ratingKeys: string[],
 	fetchFn?: FetchFn
 ): Promise<void> {
+	if (ratingKeys.length === 0) return;
 	const machineId = await getMachineId(fetchFn);
 	const uri = `server://${machineId}/com.plexapp.plugins.library/library/metadata/${ratingKeys.join(',')}`;
 
 	await request('PUT', `/playlists/${playlistId}/items`, {
 		token: userToken,
 		fetchFn,
+		accept: 'xml',
 		params: { uri }
 	});
 }
 
-/**
- * Remove a specific item from a playlist by its playlistItemID.
- */
 export async function removeFromPlaylist(
 	userToken: string,
 	playlistId: string,
@@ -636,13 +711,10 @@ export async function removeFromPlaylist(
 	await request(
 		'DELETE',
 		`/playlists/${playlistId}/items/${playlistItemId}`,
-		{ token: userToken, fetchFn }
+		{ token: userToken, fetchFn, accept: 'xml' }
 	);
 }
 
-/**
- * Get all items in a playlist (with their playlistItemIDs).
- */
 export async function getPlaylistItems(
 	userToken: string,
 	playlistId: string,
@@ -657,9 +729,6 @@ export async function getPlaylistItems(
 	return raw.MediaContainer.Metadata ?? [];
 }
 
-/**
- * List all playlists for a specific user.
- */
 export async function listPlaylists(
 	userToken: string,
 	fetchFn?: FetchFn
@@ -675,7 +744,6 @@ export async function listPlaylists(
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-/** Cache the machine identifier to avoid repeated calls. */
 let _machineId: string | null = null;
 
 async function getMachineId(fetchFn?: FetchFn): Promise<string> {
@@ -686,10 +754,10 @@ async function getMachineId(fetchFn?: FetchFn): Promise<string> {
 }
 
 /**
- * Reset the machine-ID cache.
- * Call this whenever PLEX_URL changes (e.g. from the settings save action)
- * so subsequent calls fetch the identifier from the new server.
+ * Reset all module-level caches (machine id, admin account).
+ * Call when settings change.
  */
 export function resetPlexCache(): void {
 	_machineId = null;
+	_adminAccount = null;
 }
