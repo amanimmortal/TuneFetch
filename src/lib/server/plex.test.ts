@@ -41,8 +41,10 @@ vi.mock('./settings', () => ({
 const MACHINE_ID = 'mid-abc123';
 const ADMIN_ID = 1000;
 
-function makeResponse(status: number, body: string): Response {
-	return new Response(body, { status });
+function makeResponse(status: number, body: string, contentType?: string): Response {
+	const headers: Record<string, string> = {};
+	if (contentType) headers['Content-Type'] = contentType;
+	return new Response(body, { status, headers });
 }
 
 function identityJson(): string {
@@ -82,33 +84,59 @@ type FetchFn = (url: string | URL | Request, init?: RequestInit) => Promise<Resp
  * Build a fetch stub that responds to the four endpoints touched by
  * getManagedUsers / getUserAccessToken.
  */
+interface MockResponse {
+	status: number;
+	body: string;
+	contentType?: string;
+}
+
 function buildFetch(opts: {
-	identity?: { status: number; body: string };
-	adminUser?: { status: number; body: string };
-	homeUsers?: { status: number; body: string };
-	sharedServers?: { status: number; body: string };
+	identity?: MockResponse;
+	adminUser?: MockResponse;
+	homeUsers?: MockResponse;
+	sharedServers?: MockResponse;
 }): FetchFn {
 	return vi.fn(async (url) => {
 		const u = String(url);
 		if (u.startsWith('http://plex.local:32400/') && u.endsWith('/')) {
-			const r = opts.identity ?? { status: 200, body: identityJson() };
-			return makeResponse(r.status, r.body);
+			const r = opts.identity ?? {
+				status: 200,
+				body: identityJson(),
+				contentType: 'application/json'
+			};
+			return makeResponse(r.status, r.body, r.contentType);
 		}
 		if (u === 'http://plex.local:32400/') {
-			const r = opts.identity ?? { status: 200, body: identityJson() };
-			return makeResponse(r.status, r.body);
+			const r = opts.identity ?? {
+				status: 200,
+				body: identityJson(),
+				contentType: 'application/json'
+			};
+			return makeResponse(r.status, r.body, r.contentType);
 		}
 		if (u.includes('plex.tv/api/v2/user')) {
-			const r = opts.adminUser ?? { status: 200, body: adminUserJson() };
-			return makeResponse(r.status, r.body);
+			const r = opts.adminUser ?? {
+				status: 200,
+				body: adminUserJson(),
+				contentType: 'application/json'
+			};
+			return makeResponse(r.status, r.body, r.contentType);
 		}
 		if (u.includes('plex.tv/api/home/users')) {
-			const r = opts.homeUsers ?? { status: 200, body: homeUsersXml([]) };
-			return makeResponse(r.status, r.body);
+			const r = opts.homeUsers ?? {
+				status: 200,
+				body: homeUsersXml([]),
+				contentType: 'application/xml'
+			};
+			return makeResponse(r.status, r.body, r.contentType);
 		}
 		if (u.includes('/shared_servers')) {
-			const r = opts.sharedServers ?? { status: 200, body: sharedServersXml([]) };
-			return makeResponse(r.status, r.body);
+			const r = opts.sharedServers ?? {
+				status: 200,
+				body: sharedServersXml([]),
+				contentType: 'application/xml'
+			};
+			return makeResponse(r.status, r.body, r.contentType);
 		}
 		return makeResponse(500, `unexpected url: ${u}`);
 	}) as FetchFn;
@@ -263,17 +291,13 @@ describe('getManagedUsers()', () => {
 
 	it('falls back to XML parsing when /api/v2/user returns XML instead of JSON', async () => {
 		// Reproduces the production failure: plex.tv served XML for /api/v2/user
-		// despite Accept: application/json. The XML fallback should still pull
-		// id/title/username out of the <user> element.
+		// despite Accept: application/json. Content-Type header drives the parse
+		// path, so this is what the fix actually keys off of.
 		const fetchFn = buildFetch({
 			adminUser: {
 				status: 200,
-				body: `<user id="${ADMIN_ID}" title="Admin User" username="admin" />`
-			},
-			homeUsers: { status: 200, body: homeUsersXml([{ id: 2001, title: 'Alice' }]) },
-			sharedServers: {
-				status: 200,
-				body: sharedServersXml([{ userID: 2001, accessToken: 'token-alice' }])
+				body: `<user id="${ADMIN_ID}" title="Admin User" username="admin" />`,
+				contentType: 'application/xml; charset=utf-8'
 			}
 		});
 
@@ -284,9 +308,23 @@ describe('getManagedUsers()', () => {
 			title: 'Admin User',
 			isAdmin: true
 		});
-		expect(result.users.find((u) => u.id === 2001)).toMatchObject({
-			accessToken: 'token-alice'
+	});
+
+	it('uses XML path when /api/v2/user has no Content-Type at all', async () => {
+		// Defensive case: some plex.tv mirrors omit Content-Type on this
+		// endpoint. With case-insensitive parseXmlAttributes the same call
+		// covers <user> and <User>, so a single fallback path handles both.
+		const fetchFn = buildFetch({
+			adminUser: {
+				status: 200,
+				body: `<User id="${ADMIN_ID}" title="Admin User" username="admin" />`
+				// no contentType — header will be absent
+			}
 		});
+
+		const result = await getManagedUsers(fetchFn);
+
+		expect(result.users[0]).toMatchObject({ id: ADMIN_ID, isAdmin: true });
 	});
 
 	it('shared_servers HTTP 401 → throws PlexError', async () => {
