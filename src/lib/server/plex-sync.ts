@@ -166,8 +166,24 @@ export async function syncListToPlexPlaylist(
 	// Drop those stale rows so the item below gets re-added.
 	let prunedStale = 0;
 	if (row.plex_playlist_id) {
+		// Keep the try/catch tight around the Plex API call so a DB delete
+		// error below isn't misreported as a Plex reconciliation failure.
+		// Reconciliation failures are non-fatal: we fall back to the local
+		// view and keep the sync moving. DB errors below are exceptional
+		// (schema is stable, no constraints on this DELETE) and are allowed
+		// to bubble up to the caller.
+		let livePlexItems: Awaited<ReturnType<typeof getPlaylistItems>> | null = null;
 		try {
-			const livePlexItems = await getPlaylistItems(plexToken, row.plex_playlist_id);
+			livePlexItems = await getPlaylistItems(plexToken, row.plex_playlist_id);
+		} catch (err) {
+			console.warn(
+				`[plex-sync] Could not fetch playlist ${row.plex_playlist_id} from Plex ` +
+				`(continuing with local state):`,
+				err
+			);
+		}
+
+		if (livePlexItems !== null) {
 			const liveRatingKeys = new Set(livePlexItems.map((i) => String(i.ratingKey)));
 			const deleteStmt = db.prepare('DELETE FROM plex_playlist_items WHERE id = ?');
 			for (const tracked of trackedRows) {
@@ -181,14 +197,6 @@ export async function syncListToPlexPlaylist(
 					);
 				}
 			}
-		} catch (err) {
-			// Reconciliation failure shouldn't block the sync — log and proceed
-			// with the tracked-rows view as the (possibly stale) ground truth.
-			console.warn(
-				`[plex-sync] Could not reconcile playlist ${row.plex_playlist_id} against Plex ` +
-				`(continuing with local state):`,
-				err
-			);
 		}
 	}
 
