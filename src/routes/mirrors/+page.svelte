@@ -186,7 +186,7 @@
             <button
               type="submit"
               class="btn-secondary text-xs"
-              title="Permanently ignore all {data.orphanTotal} orphan(s). They will not reappear in future scans."
+              title={`Permanently ignore all ${data.orphanTotal} orphan(s). They will not reappear in future scans.`}
             >
               Dismiss All ({data.orphanTotal})
             </button>
