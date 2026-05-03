@@ -621,17 +621,33 @@ export async function getUserAccessToken(
 // ── Public API — Track Search ─────────────────────────────────────────────────
 
 /**
- * Search for a track in the Plex library by artist name and track title.
+ * Diagnostic detail for a track-search miss.
+ *
+ * `rawCount` is how many tracks Plex returned for the title query before we
+ * filtered by artist. `topCandidate` is the closest non-match (highest result)
+ * — useful for spotting metadata drift like "Track (Remastered 2011)" vs the
+ * canonical "Track" title in Lidarr.
+ */
+export interface SearchTrackResult {
+	track: PlexTrack | null;
+	rawCount: number;
+	topCandidate?: { title: string; artist: string };
+	matchedBy?: 'exact' | 'fuzzy-artist-substring' | 'title-only';
+}
+
+/**
+ * Search for a track in the Plex library by artist name and track title,
+ * returning both the match and diagnostic context for misses.
  *
  * Uses the admin token: ratingKeys are library-wide and identical across
  * users, so the lookup itself can run as the owner.
  */
-export async function searchTrack(
+export async function searchTrackDiagnostic(
 	artistName: string,
 	trackTitle: string,
 	sectionId: string,
 	fetchFn?: FetchFn
-): Promise<PlexTrack | null> {
+): Promise<SearchTrackResult> {
 	if (!sectionId) {
 		throw new PlexError('No Plex library section ID provided for this user mapping.');
 	}
@@ -655,16 +671,46 @@ export async function searchTrack(
 			t.title.toLowerCase() === titleLower &&
 			t.grandparentTitle?.toLowerCase() === artistLower
 	);
-	if (exact) return exact;
+	if (exact) {
+		return { track: exact, rawCount: results.length, matchedBy: 'exact' };
+	}
 
 	const fuzzy = results.find(
 		(t) =>
 			t.title.toLowerCase() === titleLower &&
 			t.grandparentTitle?.toLowerCase().includes(artistLower)
 	);
-	if (fuzzy) return fuzzy;
+	if (fuzzy) {
+		return { track: fuzzy, rawCount: results.length, matchedBy: 'fuzzy-artist-substring' };
+	}
 
-	return results.find((t) => t.title.toLowerCase() === titleLower) ?? null;
+	const titleOnly = results.find((t) => t.title.toLowerCase() === titleLower);
+	if (titleOnly) {
+		return { track: titleOnly, rawCount: results.length, matchedBy: 'title-only' };
+	}
+
+	const top = results[0];
+	return {
+		track: null,
+		rawCount: results.length,
+		topCandidate: top
+			? { title: top.title, artist: top.grandparentTitle ?? '(unknown artist)' }
+			: undefined
+	};
+}
+
+/**
+ * Backwards-compatible search wrapper that returns just the track or null.
+ * Prefer `searchTrackDiagnostic` for new callers that want to log misses.
+ */
+export async function searchTrack(
+	artistName: string,
+	trackTitle: string,
+	sectionId: string,
+	fetchFn?: FetchFn
+): Promise<PlexTrack | null> {
+	const r = await searchTrackDiagnostic(artistName, trackTitle, sectionId, fetchFn);
+	return r.track;
 }
 
 // ── Public API — Playlist CRUD ────────────────────────────────────────────────
