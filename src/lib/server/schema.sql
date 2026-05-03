@@ -96,7 +96,10 @@ CREATE TABLE IF NOT EXISTS mirror_files (
 );
 CREATE INDEX IF NOT EXISTS idx_mirror_files_list_item ON mirror_files(list_item_id);
 CREATE INDEX IF NOT EXISTS idx_mirror_files_source ON mirror_files(source_path);
-CREATE INDEX IF NOT EXISTS idx_mirror_files_track_file ON mirror_files(lidarr_track_file_id);
+-- idx_mirror_files_track_file is created in db.ts, after the ALTER TABLE
+-- that adds lidarr_track_file_id. Creating it here would fail on existing
+-- databases where CREATE TABLE IF NOT EXISTS is a no-op and the column
+-- doesn't exist yet at the point this file runs.
 
 -- App-wide configuration (key-value store for settings page).
 CREATE TABLE IF NOT EXISTS settings (
