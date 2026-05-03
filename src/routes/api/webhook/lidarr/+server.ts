@@ -110,17 +110,18 @@ export const POST: RequestHandler = async ({ request }) => {
 
       if (newFile) {
         tasks.push(
-          remirrorUpgrade(oldFile.path, newFile.path).catch((err) =>
+          remirrorUpgrade(oldFile.path, newFile.path, oldFile.id, newFile.id).catch((err) =>
             console.error(`[webhook] remirror upgrade failed for ${oldFile.path}:`, err)
           )
         );
       } else {
-        // No matching new file -- mark existing mirrors as stale
+        // No matching new file -- mark existing mirrors as stale (match by
+        // trackFileId for stability, fall back to path for legacy rows).
         db.prepare(
           `UPDATE mirror_files
               SET status = 'stale', updated_at = CURRENT_TIMESTAMP
-            WHERE source_path = ?`
-        ).run(oldFile.path);
+            WHERE lidarr_track_file_id = ? OR source_path = ?`
+        ).run(oldFile.id, oldFile.path);
       }
     }
 
@@ -176,7 +177,9 @@ export const POST: RequestHandler = async ({ request }) => {
   for (const candidate of mirrorCandidates) {
     for (const trackFile of trackFiles) {
       tasks.push(
-        mirrorTrackFile(trackFile.path, candidate.list_item_id, ownerRoot, candidate.target_root)
+        mirrorTrackFile(trackFile.path, candidate.list_item_id, ownerRoot, candidate.target_root, {
+          trackFileId: trackFile.id
+        })
           .then(() => {
             // Only flip status inside a transaction, and only after confirming
             // an active mirror_files row exists. This prevents a race where two

@@ -55,6 +55,27 @@ export function getDb(): Database.Database {
     db.exec('ALTER TABLE plex_user_mappings ADD COLUMN plex_user_id INTEGER');
   }
 
+  // Migration: self-healing columns on mirror_files.
+  // Stable Lidarr handles let us re-resolve a current source path when the
+  // cached one goes stale (file moved/renamed/upgraded by Lidarr).
+  const mirrorFileCols = (db.pragma('table_info(mirror_files)') as Array<{ name: string }>)
+    .map((c) => c.name);
+  if (!mirrorFileCols.includes('lidarr_track_file_id')) {
+    db.exec('ALTER TABLE mirror_files ADD COLUMN lidarr_track_file_id INTEGER');
+  }
+  if (!mirrorFileCols.includes('lidarr_track_id')) {
+    db.exec('ALTER TABLE mirror_files ADD COLUMN lidarr_track_id INTEGER');
+  }
+  if (!mirrorFileCols.includes('last_verified_at')) {
+    db.exec('ALTER TABLE mirror_files ADD COLUMN last_verified_at DATETIME');
+  }
+  if (!mirrorFileCols.includes('last_error')) {
+    db.exec('ALTER TABLE mirror_files ADD COLUMN last_error TEXT');
+  }
+  db.exec(
+    'CREATE INDEX IF NOT EXISTS idx_mirror_files_track_file ON mirror_files(lidarr_track_file_id)'
+  );
+
   // Migrate artist_ownership: add ON DELETE SET NULL to owner_list_id FK.
   // SQLite does not support ALTER TABLE ... ALTER COLUMN, so recreate if needed.
   {

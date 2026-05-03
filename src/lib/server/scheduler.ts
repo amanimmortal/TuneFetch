@@ -15,7 +15,7 @@ import { getDb } from './db';
 import { getSetting, SETTING_KEYS } from './settings';
 import { cleanupExpiredSessions } from './auth';
 import { systemStatus } from './lidarr';
-import { markMissingMirrorsStale } from './mirror';
+import { markMissingMirrorsStale, verifyMirrorFiles, backfillLegacyHandles } from './mirror';
 
 // ── Orphan detection ──────────────────────────────────────────────────────────
 
@@ -121,6 +121,20 @@ export async function runOrphanScan(): Promise<void> {
   if (staleMarked > 0) {
     console.log(`[scheduler] Marked ${staleMarked} mirror file(s) as stale (missing from disk).`);
   }
+
+  // Re-validate every mirror_files row against Lidarr's current state and heal
+  // anything we can. This is the proactive layer of the self-healing trio:
+  // moves/renames Lidarr made silently get caught here even when no copy was
+  // attempted in between. Cheap because it's all local.
+  try {
+    const verify = await verifyMirrorFiles();
+    console.log(
+      `[scheduler] Mirror verify: scanned=${verify.scanned} pathsHealed=${verify.pathsHealed} ` +
+      `recopied=${verify.filesRecopied} unresolvable=${verify.unresolvable} errors=${verify.errors}`
+    );
+  } catch (err) {
+    console.error('[scheduler] Mirror verify failed:', err);
+  }
 }
 
 // ── Scheduler ─────────────────────────────────────────────────────────────────
@@ -223,6 +237,25 @@ function scheduleNextRun(): void {
 }
 
 /**
+ * One-shot legacy-handle backfill. Runs once shortly after startup so existing
+ * mirror_files rows (created before lidarr_track_file_id existed) gain stable
+ * Lidarr identifiers without waiting for the nightly verify pass. Idempotent —
+ * only touches rows where the handle is NULL.
+ */
+async function backfillLegacyHandlesOnStartup(): Promise<void> {
+  // Small delay so the first-request warm-up isn't slowed by a Lidarr query.
+  await new Promise((resolve) => setTimeout(resolve, 30_000));
+  try {
+    const updated = await backfillLegacyHandles();
+    if (updated > 0) {
+      console.log(`[startup] Backfilled Lidarr handles on ${updated} legacy mirror_files row(s).`);
+    }
+  } catch (err) {
+    console.warn('[startup] Legacy handle backfill skipped:', err);
+  }
+}
+
+/**
  * Start the nightly scheduler. Idempotent — only starts once per process.
  * Call from hooks.server.ts on first request.
  */
@@ -234,5 +267,8 @@ export function startScheduler(): void {
   // Non-blocking — don't await; log warnings asynchronously.
   checkLidarrOnStartup().catch((err) =>
     console.error('[startup] Lidarr check failed unexpectedly:', err)
+  );
+  backfillLegacyHandlesOnStartup().catch((err) =>
+    console.error('[startup] Legacy handle backfill failed unexpectedly:', err)
   );
 }

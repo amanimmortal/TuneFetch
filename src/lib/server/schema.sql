@@ -70,18 +70,33 @@ CREATE TABLE IF NOT EXISTS artist_ownership (
 );
 
 -- File copies created by TuneFetch for secondary-list items (OQ-7 resolved).
+--
+-- lidarr_track_file_id / lidarr_track_id are the stable handles we use to
+-- re-resolve a current source path against Lidarr when the cached source_path
+-- becomes invalid (file moved, renamed, upgraded). Both are nullable for legacy
+-- rows created before the columns existed; the verifier backfills them.
+--
+-- last_verified_at records the most recent successful confirmation that the
+-- cached source_path matches what Lidarr reports. last_error stores the most
+-- recent copy/refresh failure so the UI can surface a diagnostic without
+-- forcing the user to dig through logs.
 CREATE TABLE IF NOT EXISTS mirror_files (
-  id           INTEGER PRIMARY KEY,
-  list_item_id INTEGER NOT NULL REFERENCES list_items(id) ON DELETE CASCADE,
-  source_path  TEXT NOT NULL,
-  mirror_path  TEXT NOT NULL,
-  status       TEXT NOT NULL DEFAULT 'pending'
-               CHECK(status IN ('pending','active','stale')),
-  created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
-  updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP
+  id                   INTEGER PRIMARY KEY,
+  list_item_id         INTEGER NOT NULL REFERENCES list_items(id) ON DELETE CASCADE,
+  source_path          TEXT NOT NULL,
+  mirror_path          TEXT NOT NULL,
+  status               TEXT NOT NULL DEFAULT 'pending'
+                       CHECK(status IN ('pending','active','stale')),
+  lidarr_track_file_id INTEGER,
+  lidarr_track_id      INTEGER,
+  last_verified_at     DATETIME,
+  last_error           TEXT,
+  created_at           DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at           DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_mirror_files_list_item ON mirror_files(list_item_id);
 CREATE INDEX IF NOT EXISTS idx_mirror_files_source ON mirror_files(source_path);
+CREATE INDEX IF NOT EXISTS idx_mirror_files_track_file ON mirror_files(lidarr_track_file_id);
 
 -- App-wide configuration (key-value store for settings page).
 CREATE TABLE IF NOT EXISTS settings (
