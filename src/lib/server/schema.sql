@@ -100,6 +100,14 @@ CREATE TABLE IF NOT EXISTS orphan_files (
   found_at    DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Permanently ignored paths for the orphan scan.
+-- Files listed here are never reported as orphans, even after a fresh scan.
+-- Populated by the user via "Dismiss" actions on the Mirror Health page.
+CREATE TABLE IF NOT EXISTS orphan_ignore_list (
+  file_path   TEXT PRIMARY KEY,
+  ignored_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Maps Lidarr root folder paths to Plex managed users.
 -- A user in Plex maps to a root folder in Lidarr (e.g. "Ben" → /mnt/music/ben).
 -- This bridge lets TuneFetch know which Plex user should receive playlists

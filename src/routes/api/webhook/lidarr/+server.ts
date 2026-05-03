@@ -162,7 +162,7 @@ export const POST: RequestHandler = async ({ request }) => {
          JOIN lists l ON l.id = li.list_id
         WHERE li.lidarr_artist_id = ?
           AND l.root_folder_path != ?
-          AND li.sync_status IN ('mirror_pending', 'mirror_active', 'synced')`
+          AND li.sync_status IN ('mirror_pending', 'mirror_active', 'mirror_broken', 'synced')`
     )
     .all(lidarrArtistId, ownerRoot) as MirrorCandidate[];
 

@@ -15,6 +15,7 @@ import { getDb } from './db';
 import { getSetting, SETTING_KEYS } from './settings';
 import { cleanupExpiredSessions } from './auth';
 import { systemStatus } from './lidarr';
+import { markMissingMirrorsStale } from './mirror';
 
 // ── Orphan detection ──────────────────────────────────────────────────────────
 
@@ -87,6 +88,15 @@ export async function runOrphanScan(): Promise<void> {
     ).map((r) => r.mirror_path)
   );
 
+  // Build a Set of user-dismissed paths that should never be reported as orphans.
+  const ignoredPaths = new Set(
+    (
+      db.prepare('SELECT file_path FROM orphan_ignore_list').all() as Array<{
+        file_path: string;
+      }>
+    ).map((r) => r.file_path)
+  );
+
   // Replace previous scan results.
   db.prepare('DELETE FROM orphan_files').run();
 
@@ -94,7 +104,7 @@ export async function runOrphanScan(): Promise<void> {
 
   for (const { root_folder_path } of secondaryRoots) {
     await walkDir(root_folder_path, async (filePath) => {
-      if (!knownPaths.has(filePath)) {
+      if (!knownPaths.has(filePath) && !ignoredPaths.has(filePath)) {
         db.prepare(
           `INSERT OR REPLACE INTO orphan_files (file_path, root_folder) VALUES (?, ?)`
         ).run(filePath, root_folder_path);
@@ -104,6 +114,13 @@ export async function runOrphanScan(): Promise<void> {
   }
 
   console.log(`[scheduler] Orphan scan complete. Found ${orphanCount} orphan(s).`);
+
+  // Check all active mirror_files exist on disk — mark missing ones as stale
+  // so "Refresh Stale" can re-copy them (handles files deleted by Lidarr etc.)
+  const staleMarked = await markMissingMirrorsStale();
+  if (staleMarked > 0) {
+    console.log(`[scheduler] Marked ${staleMarked} mirror file(s) as stale (missing from disk).`);
+  }
 }
 
 // ── Scheduler ─────────────────────────────────────────────────────────────────

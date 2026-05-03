@@ -336,6 +336,36 @@ async function _runBackfill(
   }
 }
 
+// ── Mirror integrity check ────────────────────────────────────────────────────
+
+/**
+ * Check every active mirror_files row and mark any whose mirror_path no longer
+ * exists on disk as 'stale'. Returns the number of rows marked stale.
+ *
+ * Called during the orphan scan so a single "Scan Now" also surfaces missing
+ * files that have been deleted/moved by Lidarr or another process. The user
+ * can then click "Refresh Stale" to re-copy them from the source.
+ */
+export async function markMissingMirrorsStale(): Promise<number> {
+  const db = getDb();
+  const rows = db
+    .prepare(`SELECT id, mirror_path FROM mirror_files WHERE status = 'active'`)
+    .all() as Array<{ id: number; mirror_path: string }>;
+
+  let marked = 0;
+  for (const row of rows) {
+    try {
+      await fs.access(row.mirror_path, fsConstants.F_OK);
+    } catch {
+      db.prepare(
+        `UPDATE mirror_files SET status = 'stale', updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+      ).run(row.id);
+      marked++;
+    }
+  }
+  return marked;
+}
+
 // ── Stale-file refresh queue ──────────────────────────────────────────────────
 
 /**
