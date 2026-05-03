@@ -107,9 +107,9 @@ async function request<T>(path: string, query: Record<string, string>): Promise<
 }
 
 // ── Secondary-type catalogue — single source of truth (doc §4.1a) ────────────
-// Keys are exact MB JSON values (case-sensitive). noise=true types are negated
-// in the Lucene pre-filter AND dropped in the resolver. Compilation is
-// intentionally noise=false so it remains discoverable as a Tier 3 fallback.
+// Keys are exact MB JSON values (case-sensitive). noise=true types are dropped
+// by the resolver (canonicalAlbum.ts). Compilation is intentionally noise=false
+// so it remains discoverable as a Tier 3 fallback.
 export const SECONDARY_TYPE_CATALOGUE = {
 	Audiobook:          { noise: true  },
 	'Audio drama':      { noise: true  },
@@ -132,15 +132,6 @@ export const NOISE_SECONDARY_TYPES_JSON: ReadonlySet<string> = new Set(
 		.filter(([, meta]) => meta.noise)
 		.map(([name]) => name)
 );
-
-// Lucene-ready values (lowercased; multi-word / hyphenated / slashed values quoted).
-export const NOISE_SECONDARY_TYPES_LUCENE: readonly string[] =
-	Object.entries(SECONDARY_TYPE_CATALOGUE)
-		.filter(([, meta]) => meta.noise)
-		.map(([name]) => {
-			const lower = name.toLowerCase();
-			return /[\s\-/]/.test(lower) ? `"${lower}"` : lower;
-		});
 
 // Result Interfaces
 export interface MBArtist {
@@ -232,15 +223,14 @@ export async function searchTrack(query: string): Promise<MBRecording[]> {
 	return data.recordings || [];
 }
 
-// Appends noise-type negations and status:official to a base Lucene query.
-// Compilation is intentionally NOT negated here — it must stay discoverable
-// so recordings that only appear on compilations still return in the initial
-// search; the resolver demotes them to Tier 3.
+// Appends status:official to a base Lucene query.
+// Secondary-type negations (live, remix, etc.) are intentionally omitted here:
+// MB indexes secondarytype across ALL release groups a recording appears in, so
+// negating live/remix would also exclude studio recordings that happen to appear
+// on any live or remix album. The canonical album resolver handles secondary-type
+// ranking via its tier/penalty system.
 export function appendTrackFilters(baseQuery: string): string {
-	const negations = NOISE_SECONDARY_TYPES_LUCENE
-		.map((t) => `NOT secondarytype:${t}`)
-		.join(' ');
-	return `(${baseQuery}) AND (status:official ${negations})`;
+	return `(${baseQuery}) AND status:official`;
 }
 
 /**
