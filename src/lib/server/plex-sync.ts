@@ -16,11 +16,11 @@
 
 import { getDb } from './db';
 import {
-	searchTrack,
+	searchTrackDiagnostic,
 	createPlaylist,
 	addToPlaylist,
-	getUserAccessToken,
-	PlexError
+	getPlaylistItems,
+	getUserAccessToken
 } from './plex';
 import { decrypt, isEncrypted } from './crypto';
 
@@ -147,7 +147,60 @@ export async function syncListToPlexPlaylist(
 		)
 		.all(row.list_id) as ListItemRow[];
 
-	// Load already-synced plex_playlist_items for this playlist
+	// Load locally-tracked synced items for this playlist.
+	const trackedRows = db
+		.prepare(
+			`SELECT id, list_item_id, plex_rating_key
+			   FROM plex_playlist_items
+			  WHERE plex_playlist_id_fk = ?`
+		)
+		.all(row.id) as Array<{
+			id: number;
+			list_item_id: number;
+			plex_rating_key: string;
+		}>;
+
+	// Reconcile against the Plex playlist's actual contents. If a user has
+	// removed a track in Plex (or Plex re-scanned the library and changed the
+	// ratingKey), the local row claims "synced" but Plex doesn't have it.
+	// Drop those stale rows so the item below gets re-added.
+	let prunedStale = 0;
+	if (row.plex_playlist_id) {
+		// Keep the try/catch tight around the Plex API call so a DB delete
+		// error below isn't misreported as a Plex reconciliation failure.
+		// Reconciliation failures are non-fatal: we fall back to the local
+		// view and keep the sync moving. DB errors below are exceptional
+		// (schema is stable, no constraints on this DELETE) and are allowed
+		// to bubble up to the caller.
+		let livePlexItems: Awaited<ReturnType<typeof getPlaylistItems>> | null = null;
+		try {
+			livePlexItems = await getPlaylistItems(plexToken, row.plex_playlist_id);
+		} catch (err) {
+			console.warn(
+				`[plex-sync] Could not fetch playlist ${row.plex_playlist_id} from Plex ` +
+				`(continuing with local state):`,
+				err
+			);
+		}
+
+		if (livePlexItems !== null) {
+			const liveRatingKeys = new Set(livePlexItems.map((i) => String(i.ratingKey)));
+			const deleteStmt = db.prepare('DELETE FROM plex_playlist_items WHERE id = ?');
+			for (const tracked of trackedRows) {
+				if (!liveRatingKeys.has(String(tracked.plex_rating_key))) {
+					deleteStmt.run(tracked.id);
+					prunedStale++;
+					console.log(
+						`[plex-sync] Pruned stale plex_playlist_items row ${tracked.id} ` +
+						`(list_item ${tracked.list_item_id}, ratingKey ${tracked.plex_rating_key} ` +
+						`no longer in Plex playlist ${row.plex_playlist_id})`
+					);
+				}
+			}
+		}
+	}
+
+	// Re-read after potential pruning so alreadySynced reflects ground truth.
 	const alreadySynced = new Set(
 		(
 			db
@@ -166,7 +219,14 @@ export async function syncListToPlexPlaylist(
 		unmatched: []
 	};
 
-	// Find new items to sync
+	if (prunedStale > 0) {
+		console.log(
+			`[plex-sync] Reconcile dropped ${prunedStale} stale row(s); ` +
+			`${alreadySynced.size} item(s) still confirmed in Plex playlist ${row.plex_playlist_id}`
+		);
+	}
+
+	// Find new items to sync (anything not currently confirmed in Plex)
 	const newItems = items.filter((item) => !alreadySynced.has(item.id));
 
 	if (newItems.length === 0 && row.plex_playlist_id) {
@@ -191,13 +251,34 @@ export async function syncListToPlexPlaylist(
 		}
 
 		try {
-			const track = await searchTrack(item.artist_name, item.title, librarySectionId);
-			if (track) {
+			const search = await searchTrackDiagnostic(
+				item.artist_name,
+				item.title,
+				librarySectionId
+			);
+			if (search.track) {
+				if (search.matchedBy && search.matchedBy !== 'exact') {
+					console.log(
+						`[plex-sync] Matched "${item.artist_name} - ${item.title}" ` +
+						`via ${search.matchedBy} (Plex: "${search.track.grandparentTitle ?? '?'} - ${search.track.title}", ` +
+						`ratingKey ${search.track.ratingKey})`
+					);
+				}
 				foundItems.push({
 					listItemId: item.id,
-					ratingKey: track.ratingKey
+					ratingKey: search.track.ratingKey
 				});
 			} else {
+				const detail =
+					search.rawCount === 0
+						? 'no Plex search results — title may be indexed differently or library not yet scanned'
+						: search.topCandidate
+						? `${search.rawCount} title-search hit(s); top candidate "${search.topCandidate.artist} - ${search.topCandidate.title}" did not match expected artist/title`
+						: `${search.rawCount} title-search hit(s) but no usable candidate metadata`;
+				console.log(
+					`[plex-sync] No Plex match for list_item ${item.id} ` +
+					`"${item.artist_name} - ${item.title}" (sectionId=${librarySectionId}): ${detail}`
+				);
 				result.notFound++;
 				result.unmatched.push({
 					listItemId: item.id,
@@ -207,7 +288,8 @@ export async function syncListToPlexPlaylist(
 			}
 		} catch (err) {
 			console.error(
-				`[plex-sync] Error searching Plex for "${item.artist_name} - ${item.title}":`,
+				`[plex-sync] Error searching Plex for list_item ${item.id} ` +
+				`"${item.artist_name} - ${item.title}":`,
 				err
 			);
 			result.errors++;
