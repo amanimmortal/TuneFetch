@@ -27,6 +27,8 @@ interface OrphanRow {
   found_at: string;
 }
 
+const ORPHAN_DISPLAY_LIMIT = 500;
+
 // ── Load ──────────────────────────────────────────────────────────────────────
 
 export const load: PageServerLoad = async () => {
@@ -88,13 +90,18 @@ export const load: PageServerLoad = async () => {
     )
     .all() as MirrorFileRow[];
 
-  // Orphan files from the most recent scan
+  // Total orphan count (separate from the display-capped list)
+  const orphanTotalRow = db
+    .prepare(`SELECT COUNT(*) AS count FROM orphan_files`)
+    .get() as { count: number };
+
+  // Orphan files from the most recent scan (capped for display)
   const orphans = db
     .prepare(
       `SELECT id, file_path, root_folder, found_at
          FROM orphan_files
-        ORDER BY found_at DESC
-        LIMIT 500`
+        ORDER BY file_path ASC
+        LIMIT ${ORPHAN_DISPLAY_LIMIT}`
     )
     .all() as OrphanRow[];
 
@@ -112,6 +119,8 @@ export const load: PageServerLoad = async () => {
     staleFiles,
     pendingFiles,
     orphans,
+    orphanTotal: orphanTotalRow.count,
+    orphanCapped: orphanTotalRow.count > ORPHAN_DISPLAY_LIMIT,
     lastScan: lastScanRow.last_scan
   };
 };
@@ -141,5 +150,40 @@ export const actions: Actions = {
       const msg = err instanceof Error ? err.message : String(err);
       return fail(500, { scanError: msg });
     }
+  },
+
+  /**
+   * Add a single orphan to the permanent ignore list and remove it from
+   * the current scan results. The file will not reappear in future scans.
+   */
+  dismissOrphan: async ({ request }) => {
+    const data = await request.formData();
+    const filePath = data.get('file_path');
+    if (typeof filePath !== 'string' || !filePath) {
+      return fail(400, { dismissError: 'Missing file_path' });
+    }
+    const db = getDb();
+    db.prepare(
+      `INSERT OR IGNORE INTO orphan_ignore_list (file_path) VALUES (?)`
+    ).run(filePath);
+    db.prepare(`DELETE FROM orphan_files WHERE file_path = ?`).run(filePath);
+    return { dismissed: 1 };
+  },
+
+  /**
+   * Add ALL current orphans to the permanent ignore list and clear the table.
+   * Use this to bulk-dismiss pre-existing files that TuneFetch did not create.
+   */
+  dismissAllOrphans: async () => {
+    const db = getDb();
+    const count = db.transaction(() => {
+      db.prepare(
+        `INSERT OR IGNORE INTO orphan_ignore_list (file_path)
+         SELECT file_path FROM orphan_files`
+      ).run();
+      const { changes } = db.prepare(`DELETE FROM orphan_files`).run();
+      return changes;
+    })();
+    return { dismissed: count };
   }
 };

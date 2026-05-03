@@ -87,6 +87,15 @@ export async function runOrphanScan(): Promise<void> {
     ).map((r) => r.mirror_path)
   );
 
+  // Build a Set of user-dismissed paths that should never be reported as orphans.
+  const ignoredPaths = new Set(
+    (
+      db.prepare('SELECT file_path FROM orphan_ignore_list').all() as Array<{
+        file_path: string;
+      }>
+    ).map((r) => r.file_path)
+  );
+
   // Replace previous scan results.
   db.prepare('DELETE FROM orphan_files').run();
 
@@ -94,7 +103,7 @@ export async function runOrphanScan(): Promise<void> {
 
   for (const { root_folder_path } of secondaryRoots) {
     await walkDir(root_folder_path, async (filePath) => {
-      if (!knownPaths.has(filePath)) {
+      if (!knownPaths.has(filePath) && !ignoredPaths.has(filePath)) {
         db.prepare(
           `INSERT OR REPLACE INTO orphan_files (file_path, root_folder) VALUES (?, ?)`
         ).run(filePath, root_folder_path);

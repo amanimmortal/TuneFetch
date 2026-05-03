@@ -6,10 +6,12 @@
   export let form: ActionData;
 
   $: f = form as Record<string, unknown> | null;
-  $: refreshError = (f?.refreshError as string | undefined) ?? null;
-  $: scanError    = (f?.scanError    as string | undefined) ?? null;
-  $: refreshed    = (f?.refreshed    as number | undefined) ?? null;
-  $: scanned      = (f?.scanned      as boolean | undefined) ?? false;
+  $: refreshError  = (f?.refreshError  as string | undefined) ?? null;
+  $: scanError     = (f?.scanError     as string | undefined) ?? null;
+  $: dismissError  = (f?.dismissError  as string | undefined) ?? null;
+  $: refreshed     = (f?.refreshed     as number | undefined) ?? null;
+  $: scanned       = (f?.scanned       as boolean | undefined) ?? false;
+  $: dismissed     = (f?.dismissed     as number | undefined) ?? null;
 
   // Truncate long paths for display — show tail end, most readable part
   function shortPath(p: string, maxLen = 60): string {
@@ -54,6 +56,9 @@
   {#if scanError}
     <div class="rounded-md border border-red-800 bg-red-900/40 p-3 text-sm text-red-300">{scanError}</div>
   {/if}
+  {#if dismissError}
+    <div class="rounded-md border border-red-800 bg-red-900/40 p-3 text-sm text-red-300">{dismissError}</div>
+  {/if}
   {#if refreshed !== null}
     <div class="rounded-md border border-green-800 bg-green-900/40 p-3 text-sm text-green-300">
       Refreshed {refreshed} file(s) successfully.
@@ -61,7 +66,12 @@
   {/if}
   {#if scanned}
     <div class="rounded-md border border-sky-800 bg-sky-900/40 p-3 text-sm text-sky-300">
-      Orphan scan complete.{data.orphans.length > 0 ? ` Found ${data.orphans.length} orphan(s).` : ' No orphans found.'}
+      Orphan scan complete.{data.orphanTotal > 0 ? ` Found ${data.orphanTotal} orphan(s).` : ' No orphans found.'}
+    </div>
+  {/if}
+  {#if dismissed !== null}
+    <div class="rounded-md border border-green-800 bg-green-900/40 p-3 text-sm text-green-300">
+      {dismissed} orphan{dismissed === 1 ? '' : 's'} dismissed — {dismissed === 1 ? 'it' : 'they'} will not reappear in future scans.
     </div>
   {/if}
 
@@ -155,23 +165,36 @@
 
   <!-- ── Orphan files ──────────────────────────────────────────────────────── -->
   <div class="space-y-2">
-    <div class="flex items-baseline justify-between">
+    <div class="flex items-center justify-between gap-2">
       <h2 class="text-lg font-medium text-slate-200">
         Orphan Files
-        {#if data.orphans.length > 0}
+        {#if data.orphanTotal > 0}
           <span class="ml-2 rounded-full bg-amber-900/50 px-2 py-0.5 text-sm font-normal text-amber-300">
-            {data.orphans.length}
+            {data.orphanTotal}
           </span>
         {/if}
       </h2>
-      {#if data.lastScan}
-        <p class="text-xs text-slate-500">Last scan: {new Date(data.lastScan).toLocaleString()}</p>
-      {:else}
-        <p class="text-xs text-slate-500">No scan run yet — click Scan Now</p>
-      {/if}
+      <div class="flex items-center gap-3">
+        {#if data.lastScan}
+          <p class="text-xs text-slate-500">Last scan: {new Date(data.lastScan).toLocaleString()}</p>
+        {:else}
+          <p class="text-xs text-slate-500">No scan run yet — click Scan Now</p>
+        {/if}
+        {#if data.orphanTotal > 0}
+          <form method="POST" action="?/dismissAllOrphans" use:enhance>
+            <button
+              type="submit"
+              class="btn-secondary text-xs"
+              title="Permanently ignore all {data.orphanTotal} orphan(s). They will not reappear in future scans."
+            >
+              Dismiss All ({data.orphanTotal})
+            </button>
+          </form>
+        {/if}
+      </div>
     </div>
 
-    {#if data.orphans.length === 0}
+    {#if data.orphanTotal === 0}
       <div class="card text-sm text-slate-400">
         {#if data.lastScan}
           No orphan files found in the last scan.
@@ -182,14 +205,24 @@
     {:else}
       <p class="text-sm text-slate-400">
         These files exist under a mirror root folder but have no matching record in the database.
-        They may be left over from a deleted list item. Review before deleting manually.
+        They may be pre-existing library files or left over from a deleted list item.
+        Use <strong class="text-slate-300">Dismiss</strong> to permanently exclude a file from future scans,
+        or <strong class="text-slate-300">Dismiss All</strong> to clear them all at once.
       </p>
+
+      {#if data.orphanCapped}
+        <div class="rounded-md border border-amber-800 bg-amber-900/20 p-3 text-sm text-amber-300">
+          Showing {data.orphans.length} of {data.orphanTotal} orphans. Use <strong>Dismiss All</strong> to clear them all.
+        </div>
+      {/if}
+
       <div class="overflow-x-auto rounded-lg border border-slate-700">
         <table class="w-full text-sm">
           <thead class="border-b border-slate-700 bg-slate-800/50">
             <tr>
               <th class="px-4 py-2 text-left text-slate-300">File path</th>
               <th class="px-4 py-2 text-left text-slate-300">Root folder</th>
+              <th class="px-4 py-2 text-left text-slate-300"></th>
             </tr>
           </thead>
           <tbody class="divide-y divide-slate-800">
@@ -200,6 +233,14 @@
                 </td>
                 <td class="px-4 py-2 font-mono text-xs text-slate-500" title={o.root_folder}>
                   {shortPath(o.root_folder)}
+                </td>
+                <td class="px-4 py-2 text-right">
+                  <form method="POST" action="?/dismissOrphan" use:enhance>
+                    <input type="hidden" name="file_path" value={o.file_path} />
+                    <button type="submit" class="text-xs text-slate-500 hover:text-slate-300 transition-colors">
+                      Dismiss
+                    </button>
+                  </form>
                 </td>
               </tr>
             {/each}
