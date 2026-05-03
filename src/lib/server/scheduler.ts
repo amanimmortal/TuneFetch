@@ -15,6 +15,7 @@ import { getDb } from './db';
 import { getSetting, SETTING_KEYS } from './settings';
 import { cleanupExpiredSessions } from './auth';
 import { systemStatus } from './lidarr';
+import { markMissingMirrorsStale } from './mirror';
 
 // ── Orphan detection ──────────────────────────────────────────────────────────
 
@@ -113,6 +114,13 @@ export async function runOrphanScan(): Promise<void> {
   }
 
   console.log(`[scheduler] Orphan scan complete. Found ${orphanCount} orphan(s).`);
+
+  // Check all active mirror_files exist on disk — mark missing ones as stale
+  // so "Refresh Stale" can re-copy them (handles files deleted by Lidarr etc.)
+  const staleMarked = await markMissingMirrorsStale();
+  if (staleMarked > 0) {
+    console.log(`[scheduler] Marked ${staleMarked} mirror file(s) as stale (missing from disk).`);
+  }
 }
 
 // ── Scheduler ─────────────────────────────────────────────────────────────────

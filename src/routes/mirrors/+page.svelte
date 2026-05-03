@@ -66,7 +66,8 @@
   {/if}
   {#if scanned}
     <div class="rounded-md border border-sky-800 bg-sky-900/40 p-3 text-sm text-sky-300">
-      Orphan scan complete.{data.orphanTotal > 0 ? ` Found ${data.orphanTotal} orphan(s).` : ' No orphans found.'}
+      Scan complete.{data.orphanTotal > 0 ? ` Found ${data.orphanTotal} orphan(s).` : ' No orphans found.'}
+      {data.staleCount > 0 ? ` ${data.staleCount} mirror file(s) are missing from disk — use Refresh Stale to re-copy them.` : ''}
     </div>
   {/if}
   {#if dismissed !== null}

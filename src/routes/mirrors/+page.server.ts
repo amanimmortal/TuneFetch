@@ -140,11 +140,14 @@ export const actions: Actions = {
   },
 
   /**
-   * Run the orphan detection scan immediately (on-demand).
+   * Run the orphan detection scan + mirror integrity check immediately (on-demand).
+   * Returns orphan and newly-stale counts so the UI can show actionable feedback.
    */
   scanNow: async () => {
     try {
       await runOrphanScan();
+      // orphanTotal is reloaded on the next page render via data; return scanned=true
+      // so the feedback banner shows. staleCount is also reloaded from fresh data.
       return { scanned: true };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
