@@ -1034,17 +1034,25 @@ export async function backfillLegacyHandles(): Promise<number> {
  */
 export function repairCorruptedMirrorPaths(): number {
   const db = getDb();
+  const t0 = performance.now();
 
+  // Push the "is the path corrupted?" filter into SQL so we don't scan the
+  // whole table on every startup. The deployment target is Linux (Docker),
+  // so an absolute path always starts with "/". The owner_root subquery
+  // returns at most one row even if the unlikely case of duplicate
+  // artist_ownership rows for a single lidarr_artist_id arises.
   const rows = db
     .prepare(
       `SELECT mf.id, mf.source_path, mf.mirror_path,
-              ao.root_folder_path AS owner_root,
-              l.root_folder_path  AS target_root
+              l.root_folder_path AS target_root,
+              (SELECT ao.root_folder_path
+                 FROM artist_ownership ao
+                WHERE ao.lidarr_artist_id = li.lidarr_artist_id
+                LIMIT 1) AS owner_root
          FROM mirror_files mf
-         JOIN list_items li      ON li.id = mf.list_item_id
-         JOIN lists l            ON l.id  = li.list_id
-         LEFT JOIN artist_ownership ao
-           ON ao.lidarr_artist_id = li.lidarr_artist_id`
+         JOIN list_items li ON li.id = mf.list_item_id
+         JOIN lists l       ON l.id  = li.list_id
+        WHERE mf.mirror_path NOT LIKE '/%'`
     )
     .all() as Array<{
       id: number;
@@ -1056,6 +1064,9 @@ export function repairCorruptedMirrorPaths(): number {
 
   let repaired = 0;
   for (const row of rows) {
+    // Defensive double-check — the SQL filter is the primary guard, but
+    // isAbsolute() is the authoritative test (handles edge cases the LIKE
+    // pattern misses, e.g. paths that started with whitespace).
     if (isAbsolute(row.mirror_path)) continue;
 
     if (!row.owner_root || !isAbsolute(row.source_path)) {
@@ -1087,5 +1098,12 @@ export function repairCorruptedMirrorPaths(): number {
     repaired++;
   }
 
+  const ms = Math.round(performance.now() - t0);
+  if (rows.length > 0 || ms > 50) {
+    console.log(
+      `[mirror] repairCorruptedMirrorPaths: examined ${rows.length} candidate row(s), ` +
+      `repaired ${repaired} in ${ms}ms`
+    );
+  }
   return repaired;
 }
