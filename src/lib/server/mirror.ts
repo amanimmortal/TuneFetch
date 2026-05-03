@@ -46,7 +46,18 @@ interface MirrorRow {
   status: 'pending' | 'active' | 'stale';
   lidarr_track_file_id: number | null;
   lidarr_track_id: number | null;
+  /** Joined from list_items at query time so the resolver doesn't need a per-row DB lookup. */
+  lidarr_artist_id: number | null;
 }
+
+/** SELECT clause for fetching a MirrorRow with the artist id joined in. */
+const MIRROR_ROW_SELECT = `
+  SELECT mf.id, mf.list_item_id, mf.source_path, mf.mirror_path, mf.status,
+         mf.lidarr_track_file_id, mf.lidarr_track_id,
+         li.lidarr_artist_id
+    FROM mirror_files mf
+    LEFT JOIN list_items li ON li.id = mf.list_item_id
+`;
 
 // ── Path helpers ──────────────────────────────────────────────────────────────
 
@@ -119,28 +130,43 @@ export async function copyFile(sourcePath: string, destPath: string): Promise<vo
 // ── Self-healing source resolution ────────────────────────────────────────────
 
 /**
- * Cache of `getTrackFiles(artistId)` results, keyed by artistId.
+ * Per-run cache of Lidarr track-file and track lookups, keyed by artistId.
  *
  * When the verifier or a self-heal is processing many rows for the same
- * artist, this avoids hammering Lidarr with one request per file. The cache
- * is a parameter passed into the resolver so callers control its lifetime —
- * a single backfill or verify pass shares one cache, but unrelated calls
- * always start fresh and see current Lidarr state.
+ * artist, this avoids hammering Lidarr with one request per file. Callers
+ * control the cache's lifetime — a single backfill or verify pass shares
+ * one context, but unrelated calls always start fresh and see current
+ * Lidarr state.
  */
-export type TrackFileCache = Map<number, Promise<LidarrTrackFile[]>>;
+export interface ResolveContext {
+  trackFiles: Map<number, Promise<LidarrTrackFile[]>>;
+  tracks: Map<number, Promise<LidarrTrack[]>>;
+}
 
-export function newTrackFileCache(): TrackFileCache {
-  return new Map();
+export function newResolveContext(): ResolveContext {
+  return { trackFiles: new Map(), tracks: new Map() };
 }
 
 function getTrackFilesCached(
   artistId: number,
-  cache: TrackFileCache
+  ctx: ResolveContext
 ): Promise<LidarrTrackFile[]> {
-  let p = cache.get(artistId);
+  let p = ctx.trackFiles.get(artistId);
   if (!p) {
     p = getTrackFiles(artistId);
-    cache.set(artistId, p);
+    ctx.trackFiles.set(artistId, p);
+  }
+  return p;
+}
+
+function getTracksCached(
+  artistId: number,
+  ctx: ResolveContext
+): Promise<LidarrTrack[]> {
+  let p = ctx.tracks.get(artistId);
+  if (!p) {
+    p = getTracks(artistId);
+    ctx.tracks.set(artistId, p);
   }
   return p;
 }
@@ -167,23 +193,18 @@ function getTrackFilesCached(
  */
 async function resolveCurrentSourcePath(
   row: MirrorRow,
-  cache: TrackFileCache
+  ctx: ResolveContext
 ): Promise<string | null> {
-  const db = getDb();
-
-  // We need the artist id to query Lidarr. It lives on the parent list_item.
-  const li = db
-    .prepare('SELECT lidarr_artist_id FROM list_items WHERE id = ?')
-    .get(row.list_item_id) as { lidarr_artist_id: number | null } | undefined;
-
-  if (!li || li.lidarr_artist_id == null) {
+  // Artist id is joined into MirrorRow at query time, so no per-row DB hit.
+  if (row.lidarr_artist_id == null) {
     return null;
   }
-  const artistId = li.lidarr_artist_id;
+  const artistId = row.lidarr_artist_id;
+  const db = getDb();
 
   let trackFiles: LidarrTrackFile[];
   try {
-    trackFiles = await getTrackFilesCached(artistId, cache);
+    trackFiles = await getTrackFilesCached(artistId, ctx);
   } catch (err) {
     // Network error or Lidarr down — caller will leave row stale and retry later.
     if (err instanceof LidarrError) {
@@ -204,7 +225,7 @@ async function resolveCurrentSourcePath(
   if (row.lidarr_track_id != null) {
     let tracks: LidarrTrack[];
     try {
-      tracks = await getTracks(artistId);
+      tracks = await getTracksCached(artistId, ctx);
     } catch {
       tracks = [];
     }
@@ -276,7 +297,7 @@ interface HealResult {
 async function copyWithHealing(
   row: MirrorRow,
   destPath: string,
-  cache: TrackFileCache
+  ctx: ResolveContext
 ): Promise<HealResult> {
   const db = getDb();
   let sourcePath = row.source_path;
@@ -303,7 +324,7 @@ async function copyWithHealing(
   // Source not on disk — ask Lidarr where it is now.
   let fresh: string | null;
   try {
-    fresh = await resolveCurrentSourcePath(row, cache);
+    fresh = await resolveCurrentSourcePath(row, ctx);
   } catch (err) {
     // Lidarr unreachable — leave row alone, surface the underlying error.
     return {
@@ -605,12 +626,14 @@ async function _runBackfill(
 
     const allTrackFiles = await getTrackFiles(lidarrArtistId);
 
-    // Build a trackFileId → trackId map so each mirrorTrackFile call gets both
-    // handles. This is one extra Lidarr request per backfill regardless of how
-    // many files are in scope.
+    // One getTracks call per backfill — used both to build the trackFileId →
+    // trackId map (so mirrorTrackFile gets both handles) and, for track-type
+    // items, to resolve the specific track's file. Failure is non-fatal: we
+    // can still mirror with just trackFileId and skip the track-id hedge.
     const fileToTrackId = new Map<number, number>();
+    let allTracks: LidarrTrack[] = [];
     try {
-      const allTracks = await getTracks(lidarrArtistId);
+      allTracks = await getTracks(lidarrArtistId);
       for (const t of allTracks) {
         const tfid = (t as unknown as { trackFileId?: number }).trackFileId;
         if (tfid && tfid > 0) {
@@ -632,7 +655,6 @@ async function _runBackfill(
     } else {
       // Mirror only the single track file.
       if (listItem.lidarr_track_id !== null) {
-        const allTracks = await getTracks(lidarrArtistId);
         const track = allTracks.find((t) => t.id === listItem.lidarr_track_id);
         const trackFileId = track
           ? (track as unknown as { trackFileId?: number }).trackFileId
@@ -782,19 +804,15 @@ export async function markMissingMirrorsStale(): Promise<number> {
 export function enqueueRefreshStaleAll(): number {
   const db = getDb();
   const staleRows = db
-    .prepare(
-      `SELECT id, list_item_id, source_path, mirror_path, status,
-              lidarr_track_file_id, lidarr_track_id
-         FROM mirror_files WHERE status = 'stale'`
-    )
+    .prepare(`${MIRROR_ROW_SELECT} WHERE mf.status = 'stale'`)
     .all() as MirrorRow[];
 
-  // One shared track-file cache for the whole batch — many rows for the same
-  // artist hit Lidarr only once.
-  const cache = newTrackFileCache();
+  // One shared resolve context for the whole batch — many rows for the same
+  // artist hit Lidarr (track files + tracks) only once.
+  const ctx = newResolveContext();
 
   for (const row of staleRows) {
-    const job = _refreshSingleStale(row, cache);
+    const job = _refreshSingleStale(row, ctx);
     _activeJobs.add(job);
     job.finally(() => _activeJobs.delete(job)).catch(() => {});
   }
@@ -802,9 +820,9 @@ export function enqueueRefreshStaleAll(): number {
   return staleRows.length;
 }
 
-async function _refreshSingleStale(row: MirrorRow, cache: TrackFileCache): Promise<void> {
+async function _refreshSingleStale(row: MirrorRow, ctx: ResolveContext): Promise<void> {
   const db = getDb();
-  const result = await copyWithHealing(row, row.mirror_path, cache);
+  const result = await copyWithHealing(row, row.mirror_path, ctx);
 
   if (result.ok) {
     db.prepare(
@@ -874,7 +892,7 @@ export interface VerifyReport {
  */
 export async function verifyMirrorFiles(): Promise<VerifyReport> {
   const db = getDb();
-  const cache = newTrackFileCache();
+  const ctx = newResolveContext();
   const report: VerifyReport = {
     scanned: 0,
     pathsHealed: 0,
@@ -883,20 +901,17 @@ export async function verifyMirrorFiles(): Promise<VerifyReport> {
     errors: 0
   };
 
+  // ORDER BY list_item_id keeps rows for the same artist contiguous, which
+  // maximizes the cache hit rate as we walk the table.
   const rows = db
-    .prepare(
-      `SELECT id, list_item_id, source_path, mirror_path, status,
-              lidarr_track_file_id, lidarr_track_id
-         FROM mirror_files
-        ORDER BY list_item_id`
-    )
+    .prepare(`${MIRROR_ROW_SELECT} ORDER BY mf.list_item_id`)
     .all() as MirrorRow[];
 
   for (const row of rows) {
     report.scanned++;
     try {
       // First confirm what Lidarr currently says about this file.
-      const fresh = await resolveCurrentSourcePath(row, cache);
+      const fresh = await resolveCurrentSourcePath(row, ctx);
       if (fresh === null) {
         // Lidarr doesn't know about this file anymore.
         db.prepare(
@@ -1007,24 +1022,21 @@ export async function verifyMirrorFiles(): Promise<VerifyReport> {
  */
 export async function backfillLegacyHandles(): Promise<number> {
   const db = getDb();
-  const cache = newTrackFileCache();
+  const ctx = newResolveContext();
 
   const rows = db
     .prepare(
-      `SELECT mf.id, mf.list_item_id, mf.source_path, mf.mirror_path, mf.status,
-              mf.lidarr_track_file_id, mf.lidarr_track_id,
-              li.lidarr_artist_id
-         FROM mirror_files mf
-         JOIN list_items li ON li.id = mf.list_item_id
+      `${MIRROR_ROW_SELECT}
         WHERE mf.lidarr_track_file_id IS NULL
           AND li.lidarr_artist_id IS NOT NULL`
     )
-    .all() as Array<MirrorRow & { lidarr_artist_id: number }>;
+    .all() as MirrorRow[];
 
   let updated = 0;
   for (const row of rows) {
+    if (row.lidarr_artist_id == null) continue; // belt-and-braces with the WHERE clause
     try {
-      const trackFiles = await getTrackFilesCached(row.lidarr_artist_id, cache);
+      const trackFiles = await getTrackFilesCached(row.lidarr_artist_id, ctx);
       const exact = trackFiles.find((f) => f.path === row.source_path);
       let chosen: LidarrTrackFile | undefined = exact;
       if (!chosen) {
