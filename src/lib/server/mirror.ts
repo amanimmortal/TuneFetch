@@ -13,7 +13,7 @@
  */
 
 import { promises as fs, constants as fsConstants } from 'node:fs';
-import { dirname, relative, join, basename } from 'node:path';
+import { dirname, relative, join, basename, isAbsolute } from 'node:path';
 import { getDb } from './db';
 import {
   getTrackFiles,
@@ -358,22 +358,14 @@ async function copyWithHealing(
     );
   }
 
-  // Recompute mirror_path against the new source under the same target root,
-  // so a Lidarr rename of the artist folder propagates through to the mirror.
-  // We derive the target root from the existing mirror_path: it's the prefix
-  // shared with the OLD source's relative shape under its owner root. Since
-  // we don't know the owner root here, we instead use the simpler rule: keep
-  // the mirror filename and recompute its parent dir from the new source.
-  const newDest = _recomputeMirrorPath(row.mirror_path, row.source_path, fresh);
-  if (newDest !== row.mirror_path) {
-    db.prepare(
-      `UPDATE mirror_files SET mirror_path = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-    ).run(newDest, row.id);
-  }
-
-  // One retry only — if this fails, leave it for the user/verifier.
+  // Heal only the source_path. The mirror_path stays where it was originally
+  // computed (via buildMirrorPath at mirror time, with proper ownerRoot /
+  // targetRoot). Trying to "follow" a Lidarr rename from inside the heal path
+  // is fragile — we don't have ownerRoot here, and any path-arithmetic we do
+  // risks producing a relative path or a wrong remap. Re-mirroring under a
+  // new layout is a separate, intentional operation.
   try {
-    await copyFile(sourcePath, newDest);
+    await copyFile(sourcePath, row.mirror_path);
     return { ok: true, sourcePath, unresolvable: false };
   } catch (err) {
     return {
@@ -383,43 +375,6 @@ async function copyWithHealing(
       error: err as Error
     };
   }
-}
-
-/**
- * Recompute a mirror destination when the source has moved or been renamed.
- *
- * We don't have ownerRoot here, so we infer the relative tail of the old
- * source under its directory and apply the same suffix change to the
- * mirror path. Concretely: if oldSrc and newSrc share a common prefix, the
- * mirror path's tail is updated by the same diff. When the change is just
- * a filename rename in the same directory, this swaps only the basename.
- */
-function _recomputeMirrorPath(
-  oldMirror: string,
-  oldSource: string,
-  newSource: string
-): string {
-  // Find the longest path-aligned common suffix of oldMirror and oldSource.
-  // Whatever in oldSource matches the tail of oldMirror is the "mirror tail";
-  // we replace that tail using the corresponding tail of newSource.
-  const oldS = oldSource.replace(/\\/g, '/').split('/');
-  const oldM = oldMirror.replace(/\\/g, '/').split('/');
-  const newS = newSource.replace(/\\/g, '/').split('/');
-
-  let matchLen = 0;
-  while (
-    matchLen < oldS.length &&
-    matchLen < oldM.length &&
-    oldS[oldS.length - 1 - matchLen] === oldM[oldM.length - 1 - matchLen]
-  ) {
-    matchLen++;
-  }
-  if (matchLen === 0) return oldMirror;
-
-  const mirrorPrefix = oldM.slice(0, oldM.length - matchLen);
-  const newTail = newS.slice(Math.max(0, newS.length - matchLen));
-  // Re-join using forward slashes; node:path will normalize on use.
-  return [...mirrorPrefix, ...newTail].join('/');
 }
 
 // ── Per-file mirror operations ────────────────────────────────────────────────
@@ -932,22 +887,18 @@ export async function verifyMirrorFiles(): Promise<VerifyReport> {
       }
 
       let currentSource = row.source_path;
-      let currentMirror = row.mirror_path;
+      const currentMirror = row.mirror_path;
       if (fresh !== currentSource) {
-        const newMirror = _recomputeMirrorPath(currentMirror, currentSource, fresh);
+        // Heal source_path only; leave mirror_path alone (see copyWithHealing
+        // for rationale — we don't have ownerRoot/targetRoot here to safely
+        // remap, and re-arranging the mirror tree is out of scope for verify).
         db.prepare(
           `UPDATE mirror_files
-              SET source_path = ?,
-                  mirror_path = ?,
-                  updated_at = CURRENT_TIMESTAMP
+              SET source_path = ?, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?`
-        ).run(fresh, newMirror, row.id);
+        ).run(fresh, row.id);
         currentSource = fresh;
-        currentMirror = newMirror;
         report.pathsHealed++;
-        // The destination on disk still sits at the old mirror_path; that
-        // file is now an orphan-on-disk and the next scan will surface it
-        // for cleanup. We need to copy fresh content to the new mirror_path.
       }
 
       // Decide whether a copy is needed.
@@ -1059,4 +1010,100 @@ export async function backfillLegacyHandles(): Promise<number> {
   }
 
   return updated;
+}
+
+// ── One-shot repair for corrupted mirror_paths ────────────────────────────────
+
+/**
+ * Find any mirror_files row whose mirror_path is not absolute and rebuild
+ * it from the source_path under the list's root folder.
+ *
+ * Background: an earlier version of the heal logic recomputed mirror_path
+ * via a buggy suffix-replace that could drop the leading "/" of an absolute
+ * path. Once a relative mirror_path was persisted, every subsequent copy
+ * would try to mkdir against the process CWD and fail with EACCES on a
+ * read-only working directory.
+ *
+ * This repair runs once on startup, pre-flights every row, and replaces a
+ * relative mirror_path with the correct one derived from:
+ *   buildMirrorPath(source_path, ownerRoot, targetRoot)
+ * where ownerRoot comes from artist_ownership and targetRoot from the
+ * row's parent list. Idempotent: rows with absolute mirror_path are
+ * untouched, and rows we can't repair (missing ownership / list join)
+ * are left as-is with a warning so a human can investigate.
+ */
+export function repairCorruptedMirrorPaths(): number {
+  const db = getDb();
+  const t0 = performance.now();
+
+  // Push the "is the path corrupted?" filter into SQL so we don't scan the
+  // whole table on every startup. The deployment target is Linux (Docker),
+  // so an absolute path always starts with "/". The owner_root subquery
+  // returns at most one row even if the unlikely case of duplicate
+  // artist_ownership rows for a single lidarr_artist_id arises.
+  const rows = db
+    .prepare(
+      `SELECT mf.id, mf.source_path, mf.mirror_path,
+              l.root_folder_path AS target_root,
+              (SELECT ao.root_folder_path
+                 FROM artist_ownership ao
+                WHERE ao.lidarr_artist_id = li.lidarr_artist_id
+                LIMIT 1) AS owner_root
+         FROM mirror_files mf
+         JOIN list_items li ON li.id = mf.list_item_id
+         JOIN lists l       ON l.id  = li.list_id
+        WHERE mf.mirror_path NOT LIKE '/%'`
+    )
+    .all() as Array<{
+      id: number;
+      source_path: string;
+      mirror_path: string;
+      owner_root: string | null;
+      target_root: string;
+    }>;
+
+  let repaired = 0;
+  for (const row of rows) {
+    // Defensive double-check — the SQL filter is the primary guard, but
+    // isAbsolute() is the authoritative test (handles edge cases the LIKE
+    // pattern misses, e.g. paths that started with whitespace).
+    if (isAbsolute(row.mirror_path)) continue;
+
+    if (!row.owner_root || !isAbsolute(row.source_path)) {
+      console.warn(
+        `[mirror] repairCorruptedMirrorPaths: cannot repair mirror_file ${row.id} ` +
+        `(mirror_path="${row.mirror_path}", source_path="${row.source_path}", ` +
+        `owner_root=${row.owner_root ?? 'null'}). Leaving for manual cleanup.`
+      );
+      continue;
+    }
+
+    const fixed = buildMirrorPath(row.source_path, row.owner_root, row.target_root);
+    if (!isAbsolute(fixed)) {
+      console.warn(
+        `[mirror] repairCorruptedMirrorPaths: computed path is still not absolute ` +
+        `for mirror_file ${row.id} ("${fixed}"). Leaving for manual cleanup.`
+      );
+      continue;
+    }
+
+    db.prepare(
+      `UPDATE mirror_files
+          SET mirror_path = ?, status = 'stale', updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?`
+    ).run(fixed, row.id);
+    console.log(
+      `[mirror] repaired mirror_file ${row.id}: "${row.mirror_path}" → "${fixed}" (marked stale)`
+    );
+    repaired++;
+  }
+
+  const ms = Math.round(performance.now() - t0);
+  if (rows.length > 0 || ms > 50) {
+    console.log(
+      `[mirror] repairCorruptedMirrorPaths: examined ${rows.length} candidate row(s), ` +
+      `repaired ${repaired} in ${ms}ms`
+    );
+  }
+  return repaired;
 }

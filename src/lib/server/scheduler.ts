@@ -15,7 +15,12 @@ import { getDb } from './db';
 import { getSetting, SETTING_KEYS } from './settings';
 import { cleanupExpiredSessions } from './auth';
 import { systemStatus } from './lidarr';
-import { markMissingMirrorsStale, verifyMirrorFiles, backfillLegacyHandles } from './mirror';
+import {
+  markMissingMirrorsStale,
+  verifyMirrorFiles,
+  backfillLegacyHandles,
+  repairCorruptedMirrorPaths
+} from './mirror';
 
 // ── Orphan detection ──────────────────────────────────────────────────────────
 
@@ -264,6 +269,18 @@ export function startScheduler(): void {
   _started = true;
   scheduleNextRun();
   startSessionCleanup();
+  // Synchronous DB-only repair for any corrupted mirror_path values left
+  // behind by an earlier buggy heal. Cheap, idempotent, and fixes 500s on
+  // the first refreshStale request after startup, so do it before the
+  // first request can trigger a copy.
+  try {
+    const repaired = repairCorruptedMirrorPaths();
+    if (repaired > 0) {
+      console.log(`[startup] Repaired ${repaired} mirror_files row(s) with corrupted mirror_path.`);
+    }
+  } catch (err) {
+    console.error('[startup] Mirror path repair failed:', err);
+  }
   // Non-blocking — don't await; log warnings asynchronously.
   checkLidarrOnStartup().catch((err) =>
     console.error('[startup] Lidarr check failed unexpectedly:', err)
