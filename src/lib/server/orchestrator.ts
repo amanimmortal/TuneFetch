@@ -81,6 +81,61 @@ function normalizeTitle(s: string): string {
 }
 
 /**
+ * Resolve a list_item to a Lidarr track, logging which strategy succeeded.
+ *
+ * Resolution is intentionally lossy: TuneFetch stores the MusicBrainz
+ * **recording** MBID, while Lidarr's `foreignTrackId` is the MusicBrainz
+ * **track-on-release** MBID — different identifiers for the same song —
+ * so the foreignTrackId lookup almost always fails. The title fallback is
+ * non-deterministic for songs that appear on multiple releases (e.g. a
+ * track on both the original album and a compilation), and returns the
+ * first match Lidarr's API listed.
+ *
+ * The returned track is only used to monitor + AlbumSearch the right unit
+ * so Lidarr actually downloads something — mirror scope is now always the
+ * whole artist (see _runBackfill). Logging here gives us visibility into
+ * which strategy matched and how ambiguous the title fallback was.
+ */
+function resolveTrackForListItem(
+	tracks: import('./lidarr').LidarrTrack[],
+	item: { id: number; mbid: string; title: string }
+): import('./lidarr').LidarrTrack | undefined {
+	const byMbid = tracks.find((t) => t.foreignTrackId === item.mbid);
+	if (byMbid) {
+		console.log(
+			`[orchestrator] item ${item.id}: matched track via foreignTrackId — ` +
+			`Lidarr track ${byMbid.id} "${byMbid.title}" (album ${byMbid.albumId})`
+		);
+		return byMbid;
+	}
+
+	const titleMatches = tracks.filter(
+		(t) => normalizeTitle(t.title) === normalizeTitle(item.title)
+	);
+	if (titleMatches.length === 0) return undefined;
+
+	const chosen = titleMatches[0]!;
+	if (titleMatches.length === 1) {
+		console.log(
+			`[orchestrator] item ${item.id} ("${item.title}"): matched track via title fallback — ` +
+			`Lidarr track ${chosen.id} (album ${chosen.albumId})`
+		);
+	} else {
+		const others = titleMatches
+			.slice(1, 4)
+			.map((t) => `${t.id} (album ${t.albumId})`)
+			.join(', ');
+		console.log(
+			`[orchestrator] item ${item.id} ("${item.title}"): title fallback was AMBIGUOUS — ` +
+			`${titleMatches.length} candidates, picked Lidarr track ${chosen.id} (album ${chosen.albumId}). ` +
+			`Other candidates: ${others}${titleMatches.length > 4 ? ', ...' : ''}. ` +
+			`Mirror still copies the full artist, but the chosen track is the one whose album gets AlbumSearched.`
+		);
+	}
+	return chosen;
+}
+
+/**
  * Mark a list_item as failed with an error message.
  * Always runs outside any outer transaction so partial failures are recorded.
  */
@@ -390,13 +445,10 @@ async function scenarioB(item: ListItemRow, list: ListRow): Promise<void> {
 			// We still need to find the track, monitor its parent album, and trigger a
 			// search so Lidarr actually downloads it. Without this the file never arrives,
 			// the webhook never fires, and the item sits mirror_pending forever.
-			// We also need lidarr_album_id + lidarr_track_id stored before startBackfill
-			// so the backfill can scope correctly to just this track's file.
+			// lidarr_album_id + lidarr_track_id are stored for downstream visibility,
+			// but mirror scope is now "the whole artist" regardless of the chosen track.
 			const tracks = await getTracks(lidarrArtistId);
-			let target = tracks.find((t) => t.foreignTrackId === item.mbid);
-			if (!target) {
-				target = tracks.find((t) => normalizeTitle(t.title) === normalizeTitle(item.title));
-			}
+			const target = resolveTrackForListItem(tracks, item);
 
 			if (target) {
 				const album = await getAlbum(target.albumId);
@@ -422,16 +474,9 @@ async function scenarioB(item: ListItemRow, list: ListRow): Promise<void> {
 		}
 	}
 
-	// Find the track in Lidarr.
-	// TuneFetch stores the MusicBrainz recording MBID; Lidarr's foreignTrackId is the
-	// MusicBrainz track MBID (a track-on-a-release entity). They are different IDs for
-	// the same song, so MBID lookup will often miss. Fall back to title matching.
+	// Find the track in Lidarr (see resolveTrackForListItem for why this is fuzzy).
 	const tracks = await getTracks(lidarrArtistId);
-	let target = tracks.find((t) => t.foreignTrackId === item.mbid);
-
-	if (!target) {
-		target = tracks.find((t) => normalizeTitle(t.title) === normalizeTitle(item.title));
-	}
+	const target = resolveTrackForListItem(tracks, item);
 
 	if (!target) {
 		const sample = tracks
