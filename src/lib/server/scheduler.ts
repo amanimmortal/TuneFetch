@@ -135,7 +135,8 @@ export async function runOrphanScan(): Promise<void> {
     const verify = await verifyMirrorFiles();
     console.log(
       `[scheduler] Mirror verify: scanned=${verify.scanned} pathsHealed=${verify.pathsHealed} ` +
-      `recopied=${verify.filesRecopied} unresolvable=${verify.unresolvable} errors=${verify.errors}`
+      `recopied=${verify.filesRecopied} discovered=${verify.discovered} ` +
+      `unresolvable=${verify.unresolvable} errors=${verify.errors}`
     );
   } catch (err) {
     console.error('[scheduler] Mirror verify failed:', err);

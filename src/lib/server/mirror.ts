@@ -567,13 +567,17 @@ async function _runBackfill(
     // Fail fast with a human-readable message if the mount point isn't writable.
     await checkWritable(targetRoot);
 
-    // Determine the scope of this list_item so we only mirror the files it
-    // actually represents — not every file by the artist.
+    // Sanity check that the list_item still exists. We no longer scope the
+    // backfill by type/album/track — TuneFetch always mirrors the entire
+    // artist into the secondary list. Rationale: the cost of a few extra
+    // copies is negligible compared to the risk of Lidarr later upgrading
+    // or moving a track that the original list_item didn't reference and
+    // the mirror lacking the file Plex needs. lidarr_track_id /
+    // lidarr_album_id are still used by the orchestrator to monitor +
+    // search the right unit; here they don't constrain mirror scope.
     const listItem = db
-      .prepare('SELECT type, lidarr_album_id, lidarr_track_id FROM list_items WHERE id = ?')
-      .get(listItemId) as
-        | { type: 'artist' | 'album' | 'track'; lidarr_album_id: number | null; lidarr_track_id: number | null }
-        | undefined;
+      .prepare('SELECT type FROM list_items WHERE id = ?')
+      .get(listItemId) as { type: 'artist' | 'album' | 'track' } | undefined;
 
     if (!listItem) {
       throw new Error(`list_item ${listItemId} not found — cannot determine mirror scope`);
@@ -581,14 +585,13 @@ async function _runBackfill(
 
     const allTrackFiles = await getTrackFiles(lidarrArtistId);
 
-    // One getTracks call per backfill — used both to build the trackFileId →
-    // trackId map (so mirrorTrackFile gets both handles) and, for track-type
-    // items, to resolve the specific track's file. Failure is non-fatal: we
-    // can still mirror with just trackFileId and skip the track-id hedge.
+    // One getTracks call per backfill — used to build the trackFileId →
+    // trackId map so each mirrorTrackFile gets both stable handles (lets the
+    // self-heal path re-resolve via track id if a trackFile is replaced).
+    // Failure is non-fatal: we can still mirror with just trackFileId.
     const fileToTrackId = new Map<number, number>();
-    let allTracks: LidarrTrack[] = [];
     try {
-      allTracks = await getTracks(lidarrArtistId);
+      const allTracks = await getTracks(lidarrArtistId);
       for (const t of allTracks) {
         const tfid = (t as unknown as { trackFileId?: number }).trackFileId;
         if (tfid && tfid > 0) {
@@ -599,33 +602,11 @@ async function _runBackfill(
       console.warn(`[mirror] backfill listItem=${listItemId}: getTracks failed (non-fatal):`, err);
     }
 
-    let trackFiles: LidarrTrackFile[];
-
-    if (listItem.type === 'artist') {
-      // Mirror everything downloaded for this artist.
-      trackFiles = allTrackFiles;
-    } else if (listItem.type === 'album') {
-      // Mirror only files belonging to the specific album.
-      trackFiles = allTrackFiles.filter((f) => f.albumId === listItem.lidarr_album_id);
-    } else {
-      // Mirror only the single track file.
-      if (listItem.lidarr_track_id !== null) {
-        const track = allTracks.find((t) => t.id === listItem.lidarr_track_id);
-        const trackFileId = track
-          ? (track as unknown as { trackFileId?: number }).trackFileId
-          : undefined;
-        trackFiles =
-          trackFileId !== undefined && trackFileId > 0
-            ? allTrackFiles.filter((f) => f.id === trackFileId)
-            : [];
-      } else {
-        trackFiles = [];
-      }
-    }
+    const trackFiles: LidarrTrackFile[] = allTrackFiles;
 
     console.log(
       `[mirror] backfill listItem=${listItemId} (${listItem.type}): ` +
-      `${trackFiles.length} of ${allTrackFiles.length} artist file(s) in scope`
+      `mirroring full artist — ${trackFiles.length} file(s) currently in Lidarr`
     );
 
     if (trackFiles.length === 0) {
@@ -827,6 +808,8 @@ export interface VerifyReport {
   filesRecopied: number;
   unresolvable: number;
   errors: number;
+  /** New mirror_files rows created during the discover-new pass. */
+  discovered: number;
 }
 
 /**
@@ -838,6 +821,12 @@ export interface VerifyReport {
  *   3. If row is 'active' but mirror file is missing on disk, or row was
  *      'stale'/'pending', try a healed copy.
  *   4. If Lidarr no longer has the file, mark the parent list_item broken.
+ *
+ * Then a discover-new pass: for each (list_item, target_root) with mirror
+ * candidates, fetch the artist's current trackFiles and create rows + copies
+ * for any files that aren't yet mirrored. This is the safety net that catches
+ * any webhook event that was missed and keeps the secondary list a complete
+ * mirror of the artist regardless of which path triggered the work.
  *
  * Runs after the orphan scan. Safe to invoke ad-hoc; uses an internal
  * track-file cache so per-artist Lidarr calls happen at most once per run.
@@ -853,7 +842,8 @@ export async function verifyMirrorFiles(): Promise<VerifyReport> {
     pathsHealed: 0,
     filesRecopied: 0,
     unresolvable: 0,
-    errors: 0
+    errors: 0,
+    discovered: 0
   };
 
   // ORDER BY list_item_id keeps rows for the same artist contiguous, which
@@ -952,6 +942,123 @@ export async function verifyMirrorFiles(): Promise<VerifyReport> {
         `UPDATE mirror_files SET last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
       ).run(msg, row.id);
       report.errors++;
+    }
+  }
+
+  // ── Discover-new pass ───────────────────────────────────────────────────────
+  // Find any artist files Lidarr currently has that aren't yet mirrored under
+  // a list that wants them. Targets list_items already in a mirror sync_status
+  // (so we never mirror outside the cross-library set the user opted into).
+  // Same selection rule as the webhook handler at routes/api/webhook/lidarr/+server.ts.
+  const candidates = db
+    .prepare(
+      `SELECT li.id            AS list_item_id,
+              li.lidarr_artist_id,
+              ao.root_folder_path AS owner_root,
+              l.root_folder_path  AS target_root
+         FROM list_items li
+         JOIN lists l            ON l.id = li.list_id
+         JOIN artist_ownership ao
+           ON ao.lidarr_artist_id = li.lidarr_artist_id
+        WHERE li.lidarr_artist_id IS NOT NULL
+          AND l.root_folder_path != ao.root_folder_path
+          AND li.sync_status IN ('mirror_pending','mirror_active','mirror_broken','synced')`
+    )
+    .all() as Array<{
+      list_item_id: number;
+      lidarr_artist_id: number;
+      owner_root: string;
+      target_root: string;
+    }>;
+
+  for (const c of candidates) {
+    let trackFiles: LidarrTrackFile[];
+    try {
+      trackFiles = await getTrackFilesCached(c.lidarr_artist_id, ctx);
+    } catch (err) {
+      console.warn(
+        `[mirror] verify discover-new: getTrackFiles failed for artist ${c.lidarr_artist_id} ` +
+        `(list_item ${c.list_item_id}):`,
+        err
+      );
+      report.errors++;
+      continue;
+    }
+    if (trackFiles.length === 0) continue;
+
+    // What does this list_item already have rows for? Match by trackFileId
+    // (stable) with a fallback to source_path for legacy rows.
+    const existing = db
+      .prepare(
+        `SELECT lidarr_track_file_id, source_path
+           FROM mirror_files
+          WHERE list_item_id = ?`
+      )
+      .all(c.list_item_id) as Array<{
+        lidarr_track_file_id: number | null;
+        source_path: string;
+      }>;
+    const knownTrackFileIds = new Set(
+      existing
+        .map((r) => r.lidarr_track_file_id)
+        .filter((v): v is number => v != null)
+    );
+    const knownSourcePaths = new Set(existing.map((r) => r.source_path));
+
+    // Cache trackId mapping once per artist for handle hydration.
+    let fileToTrackId: Map<number, number> | null = null;
+    const ensureTrackMap = async (): Promise<Map<number, number>> => {
+      if (fileToTrackId) return fileToTrackId;
+      const map = new Map<number, number>();
+      try {
+        const tracks = await getTracksCached(c.lidarr_artist_id, ctx);
+        for (const t of tracks) {
+          const tfid = (t as unknown as { trackFileId?: number }).trackFileId;
+          if (tfid && tfid > 0) map.set(tfid, t.id);
+        }
+      } catch {
+        // non-fatal — proceed with trackFileId only
+      }
+      fileToTrackId = map;
+      return map;
+    };
+
+    for (const file of trackFiles) {
+      if (knownTrackFileIds.has(file.id) || knownSourcePaths.has(file.path)) continue;
+      const trackMap = await ensureTrackMap();
+      try {
+        await mirrorTrackFile(file.path, c.list_item_id, c.owner_root, c.target_root, {
+          trackFileId: file.id,
+          trackId: trackMap.get(file.id)
+        });
+        report.discovered++;
+        console.log(
+          `[mirror] verify discover-new: copied missing artist file for list_item ${c.list_item_id} ` +
+          `(${file.path})`
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(
+          `[mirror] verify discover-new: failed to mirror ${file.path} for list_item ${c.list_item_id}:`,
+          err
+        );
+        // Insert a pending row so the next verify can retry without losing handles.
+        const mirrorPath = buildMirrorPath(file.path, c.owner_root, c.target_root);
+        db.prepare(
+          `INSERT INTO mirror_files
+             (list_item_id, source_path, mirror_path, status,
+              lidarr_track_file_id, lidarr_track_id, last_error)
+             VALUES (?, ?, ?, 'pending', ?, ?, ?)`
+        ).run(
+          c.list_item_id,
+          file.path,
+          mirrorPath,
+          file.id,
+          trackMap.get(file.id) ?? null,
+          msg
+        );
+        report.errors++;
+      }
     }
   }
 
