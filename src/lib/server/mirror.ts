@@ -567,20 +567,20 @@ async function _runBackfill(
     // Fail fast with a human-readable message if the mount point isn't writable.
     await checkWritable(targetRoot);
 
-    // Sanity check that the list_item still exists. We no longer scope the
-    // backfill by type/album/track — TuneFetch always mirrors the entire
-    // artist into the secondary list. Rationale: the cost of a few extra
-    // copies is negligible compared to the risk of Lidarr later upgrading
-    // or moving a track that the original list_item didn't reference and
+    // Sanity check that the list_item still exists. TuneFetch always mirrors
+    // the entire artist into the secondary list — `type` is read only for
+    // the log line below. Rationale for full-artist mirroring: a few extra
+    // copies are negligible compared to the risk of Lidarr later upgrading
+    // or moving a track that the original list_item didn't reference, and
     // the mirror lacking the file Plex needs. lidarr_track_id /
-    // lidarr_album_id are still used by the orchestrator to monitor +
-    // search the right unit; here they don't constrain mirror scope.
+    // lidarr_album_id are still set by the orchestrator for monitoring +
+    // AlbumSearch, but they don't constrain mirror scope.
     const listItem = db
       .prepare('SELECT type FROM list_items WHERE id = ?')
       .get(listItemId) as { type: 'artist' | 'album' | 'track' } | undefined;
 
     if (!listItem) {
-      throw new Error(`list_item ${listItemId} not found — cannot determine mirror scope`);
+      throw new Error(`list_item ${listItemId} not found — was it deleted mid-backfill?`);
     }
 
     const allTrackFiles = await getTrackFiles(lidarrArtistId);
@@ -971,6 +971,57 @@ export async function verifyMirrorFiles(): Promise<VerifyReport> {
       target_root: string;
     }>;
 
+  // Per-artist cache of trackFileId → trackId so multiple list_items for the
+  // same artist don't each rebuild the map. The underlying getTracksCached
+  // call is already deduped by artist via ResolveContext, but we'd otherwise
+  // still iterate the track list once per candidate.
+  const trackIdMapByArtist = new Map<number, Map<number, number>>();
+  const getFileToTrackIdMap = async (artistId: number): Promise<Map<number, number>> => {
+    const cached = trackIdMapByArtist.get(artistId);
+    if (cached) return cached;
+    const map = new Map<number, number>();
+    try {
+      const tracks = await getTracksCached(artistId, ctx);
+      for (const t of tracks) {
+        const tfid = (t as unknown as { trackFileId?: number }).trackFileId;
+        if (tfid && tfid > 0) map.set(tfid, t.id);
+      }
+    } catch {
+      // non-fatal — proceed with trackFileId only
+    }
+    trackIdMapByArtist.set(artistId, map);
+    return map;
+  };
+
+  // Insert a pending mirror_files row for a failed copy. Wrapped in its own
+  // try/catch so a transient DB error (constraint violation, locked db,
+  // future schema drift) doesn't escape the discover-new loop and abort the
+  // whole verify run — the row is a "best effort to retry next time"
+  // breadcrumb, not load-bearing.
+  const recordPendingDiscovery = (
+    listItemId: number,
+    sourcePath: string,
+    mirrorPath: string,
+    trackFileId: number,
+    trackId: number | undefined,
+    errorMsg: string
+  ): void => {
+    try {
+      db.prepare(
+        `INSERT INTO mirror_files
+           (list_item_id, source_path, mirror_path, status,
+            lidarr_track_file_id, lidarr_track_id, last_error)
+           VALUES (?, ?, ?, 'pending', ?, ?, ?)`
+      ).run(listItemId, sourcePath, mirrorPath, trackFileId, trackId ?? null, errorMsg);
+    } catch (insertErr) {
+      console.warn(
+        `[mirror] verify discover-new: failed to record pending row for list_item ${listItemId} ` +
+        `(${sourcePath}):`,
+        insertErr
+      );
+    }
+  };
+
   for (const c of candidates) {
     let trackFiles: LidarrTrackFile[];
     try {
@@ -1005,27 +1056,10 @@ export async function verifyMirrorFiles(): Promise<VerifyReport> {
     );
     const knownSourcePaths = new Set(existing.map((r) => r.source_path));
 
-    // Cache trackId mapping once per artist for handle hydration.
-    let fileToTrackId: Map<number, number> | null = null;
-    const ensureTrackMap = async (): Promise<Map<number, number>> => {
-      if (fileToTrackId) return fileToTrackId;
-      const map = new Map<number, number>();
-      try {
-        const tracks = await getTracksCached(c.lidarr_artist_id, ctx);
-        for (const t of tracks) {
-          const tfid = (t as unknown as { trackFileId?: number }).trackFileId;
-          if (tfid && tfid > 0) map.set(tfid, t.id);
-        }
-      } catch {
-        // non-fatal — proceed with trackFileId only
-      }
-      fileToTrackId = map;
-      return map;
-    };
+    const trackMap = await getFileToTrackIdMap(c.lidarr_artist_id);
 
     for (const file of trackFiles) {
       if (knownTrackFileIds.has(file.id) || knownSourcePaths.has(file.path)) continue;
-      const trackMap = await ensureTrackMap();
       try {
         await mirrorTrackFile(file.path, c.list_item_id, c.owner_root, c.target_root, {
           trackFileId: file.id,
@@ -1042,19 +1076,12 @@ export async function verifyMirrorFiles(): Promise<VerifyReport> {
           `[mirror] verify discover-new: failed to mirror ${file.path} for list_item ${c.list_item_id}:`,
           err
         );
-        // Insert a pending row so the next verify can retry without losing handles.
-        const mirrorPath = buildMirrorPath(file.path, c.owner_root, c.target_root);
-        db.prepare(
-          `INSERT INTO mirror_files
-             (list_item_id, source_path, mirror_path, status,
-              lidarr_track_file_id, lidarr_track_id, last_error)
-             VALUES (?, ?, ?, 'pending', ?, ?, ?)`
-        ).run(
+        recordPendingDiscovery(
           c.list_item_id,
           file.path,
-          mirrorPath,
+          buildMirrorPath(file.path, c.owner_root, c.target_root),
           file.id,
-          trackMap.get(file.id) ?? null,
+          trackMap.get(file.id),
           msg
         );
         report.errors++;
