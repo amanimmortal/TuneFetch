@@ -150,14 +150,17 @@ CREATE TABLE IF NOT EXISTS plex_user_mappings (
 -- A single list can have multiple plex_playlists rows (different users),
 -- and a single user can have multiple playlists from different lists.
 CREATE TABLE IF NOT EXISTS plex_playlists (
-  id               INTEGER PRIMARY KEY,
-  list_id          INTEGER NOT NULL REFERENCES lists(id) ON DELETE CASCADE,
-  plex_user_token  TEXT NOT NULL,
-  plex_user_name   TEXT NOT NULL,
-  plex_playlist_id TEXT,          -- null until first sync creates it in Plex
-  playlist_title   TEXT NOT NULL,
-  last_synced_at   DATETIME,
-  created_at       DATETIME DEFAULT CURRENT_TIMESTAMP
+  id                  INTEGER PRIMARY KEY,
+  list_id             INTEGER NOT NULL REFERENCES lists(id) ON DELETE CASCADE,
+  plex_user_token     TEXT NOT NULL,
+  plex_user_name      TEXT NOT NULL,
+  plex_playlist_id    TEXT,            -- null until first sync creates it in Plex
+  playlist_title      TEXT NOT NULL,
+  last_synced_at      DATETIME,
+  -- MA's playlist item_id once we've created/matched it. Null until first MA
+  -- sync. Persisted so subsequent syncs don't have to look up by name.
+  ma_playlist_item_id TEXT,
+  created_at          DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_plex_playlists_list ON plex_playlists(list_id);
 

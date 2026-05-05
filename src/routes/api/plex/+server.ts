@@ -10,6 +10,7 @@ import {
 	getManagedUsers,
 	PlexError
 } from '$lib/server/plex';
+import { MusicAssistantError } from '$lib/server/music-assistant';
 import { syncListToPlexPlaylist } from '$lib/server/plex-sync';
 import { getDb } from '$lib/server/db';
 import { encrypt } from '$lib/server/crypto';
@@ -72,6 +73,12 @@ export const GET: RequestHandler = async ({ url, fetch: svelteKitFetch }) => {
 		}
 	} catch (err: unknown) {
 		if (err instanceof PlexError) {
+			return json(
+				{ ok: false, error: err.message },
+				{ status: err.status ?? 500 }
+			);
+		}
+		if (err instanceof MusicAssistantError) {
 			return json(
 				{ ok: false, error: err.message },
 				{ status: err.status ?? 500 }
@@ -193,6 +200,12 @@ export const POST: RequestHandler = async ({ request, fetch: svelteKitFetch }) =
 		}
 	} catch (err: unknown) {
 		if (err instanceof PlexError) {
+			return json(
+				{ ok: false, error: err.message },
+				{ status: err.status ?? 500 }
+			);
+		}
+		if (err instanceof MusicAssistantError) {
 			return json(
 				{ ok: false, error: err.message },
 				{ status: err.status ?? 500 }

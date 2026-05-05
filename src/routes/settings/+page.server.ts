@@ -3,6 +3,11 @@ import type { Actions, PageServerLoad } from './$types';
 import { SETTING_KEYS, getAllSettings, setSetting } from '$lib/server/settings';
 import { systemStatus, LidarrError } from '$lib/server/lidarr';
 import { testConnection as testPlexConnection, PlexError, resetPlexCache } from '$lib/server/plex';
+import {
+	testConnection as testMusicAssistantConnection,
+	MusicAssistantError
+} from '$lib/server/music-assistant';
+import { encrypt } from '$lib/server/crypto';
 
 // ── Shared result shape ───────────────────────────────────────────────────────
 
@@ -57,6 +62,33 @@ async function testPlexConnectionWrapper(fetchFn?: typeof fetch): Promise<Connec
 	}
 }
 
+async function testMusicAssistantConnectionWrapper(): Promise<ConnectionResult> {
+	try {
+		await testMusicAssistantConnection();
+		return {
+			connectionStatus: 'ok',
+			connectionMessage: 'Connected to Music Assistant.'
+		};
+	} catch (err: unknown) {
+		if (err instanceof Error && err.message.includes('must be configured')) {
+			return {
+				connectionStatus: 'unconfigured',
+				connectionMessage: err.message
+			};
+		}
+		const message =
+			err instanceof MusicAssistantError
+				? err.message
+				: err instanceof Error
+					? err.message
+					: String(err);
+		return {
+			connectionStatus: 'error',
+			connectionMessage: message
+		};
+	}
+}
+
 // ── Load ──────────────────────────────────────────────────────────────────────
 
 export const load: PageServerLoad = async () => {
@@ -68,7 +100,11 @@ export const load: PageServerLoad = async () => {
 			adminContactEmail: settings[SETTING_KEYS.ADMIN_CONTACT_EMAIL] ?? '',
 			orphanScanTime: settings[SETTING_KEYS.ORPHAN_SCAN_TIME] ?? '03:00',
 			plexUrl: settings[SETTING_KEYS.PLEX_URL] ?? '',
-			plexAdminToken: settings[SETTING_KEYS.PLEX_ADMIN_TOKEN] ?? ''
+			plexAdminToken: settings[SETTING_KEYS.PLEX_ADMIN_TOKEN] ?? '',
+			musicAssistantUrl: settings[SETTING_KEYS.MUSIC_ASSISTANT_URL] ?? '',
+			// Token is encrypted at rest — only signal whether it's set, never
+			// send the value (or its ciphertext) to the client.
+			musicAssistantTokenSet: Boolean(settings[SETTING_KEYS.MUSIC_ASSISTANT_TOKEN])
 		}
 	};
 };
@@ -90,6 +126,10 @@ export const actions: Actions = {
 		const orphanScanTime = ((data.get('orphan_scan_time') as string | null) ?? '03:00').trim();
 		const plexUrl = ((data.get('plex_url') as string | null) ?? '').trim();
 		const plexAdminToken = ((data.get('plex_admin_token') as string | null) ?? '').trim();
+		const musicAssistantUrl = ((data.get('music_assistant_url') as string | null) ?? '').trim();
+		const musicAssistantToken = (
+			(data.get('music_assistant_token') as string | null) ?? ''
+		).trim();
 
 		// Validate orphan scan time: must be HH:MM with 0-23 hours and 0-59 minutes.
 		// The simple regex ^\d{2}:\d{2}$ accepts invalid values like 99:99 or 25:00
@@ -104,7 +144,9 @@ export const actions: Actions = {
 					connectionStatus: null as ConnectionStatus | null,
 					connectionMessage: null as string | null,
 					plexConnectionStatus: null as ConnectionStatus | null,
-					plexConnectionMessage: null as string | null
+					plexConnectionMessage: null as string | null,
+					musicAssistantConnectionStatus: null as ConnectionStatus | null,
+					musicAssistantConnectionMessage: null as string | null
 				});
 			}
 		}
@@ -115,6 +157,15 @@ export const actions: Actions = {
 		setSetting(SETTING_KEYS.ORPHAN_SCAN_TIME, orphanScanTime);
 		setSetting(SETTING_KEYS.PLEX_URL, plexUrl);
 		setSetting(SETTING_KEYS.PLEX_ADMIN_TOKEN, plexAdminToken);
+
+		setSetting(SETTING_KEYS.MUSIC_ASSISTANT_URL, musicAssistantUrl);
+		// "Leave blank to keep" — only persist a new token when the field is
+		// non-empty, otherwise the existing encrypted value stays untouched.
+		// Stored encrypted at rest (see crypto.ts); getMusicAssistantConfig
+		// transparently decrypts on read.
+		if (musicAssistantToken) {
+			setSetting(SETTING_KEYS.MUSIC_ASSISTANT_TOKEN, encrypt(musicAssistantToken));
+		}
 
 		// Reset the Plex machine-ID cache so the next Plex call fetches from the new URL.
 		resetPlexCache();
@@ -137,11 +188,27 @@ export const actions: Actions = {
 						connectionMessage: 'Plex URL and admin token are required to test the connection.'
 					};
 
+		// Test Music Assistant connection. The token may have been left blank
+		// to keep the existing one — check the stored value to know whether
+		// MA is configured rather than relying on the form input.
+		const maConfigured =
+			Boolean(musicAssistantUrl) &&
+			(Boolean(musicAssistantToken) || getAllSettings()[SETTING_KEYS.MUSIC_ASSISTANT_TOKEN]);
+		const musicAssistantConnection = maConfigured
+			? await testMusicAssistantConnectionWrapper()
+			: {
+					connectionStatus: 'unconfigured' as const,
+					connectionMessage:
+						'Music Assistant URL and bearer token are required to test the connection.'
+				};
+
 		return {
 			saved: true,
 			...connection,
 			plexConnectionStatus: plexConnection.connectionStatus,
-			plexConnectionMessage: plexConnection.connectionMessage
+			plexConnectionMessage: plexConnection.connectionMessage,
+			musicAssistantConnectionStatus: musicAssistantConnection.connectionStatus,
+			musicAssistantConnectionMessage: musicAssistantConnection.connectionMessage
 		};
 	},
 
@@ -151,7 +218,14 @@ export const actions: Actions = {
 	 */
 	testConnection: async () => {
 		const connection = await testLidarrConnection();
-		return { saved: false, ...connection, plexConnectionStatus: null, plexConnectionMessage: null };
+		return {
+			saved: false,
+			...connection,
+			plexConnectionStatus: null,
+			plexConnectionMessage: null,
+			musicAssistantConnectionStatus: null,
+			musicAssistantConnectionMessage: null
+		};
 	},
 
 	/**
@@ -164,7 +238,25 @@ export const actions: Actions = {
 			connectionStatus: null,
 			connectionMessage: null,
 			plexConnectionStatus: connection.connectionStatus,
-			plexConnectionMessage: connection.connectionMessage
+			plexConnectionMessage: connection.connectionMessage,
+			musicAssistantConnectionStatus: null,
+			musicAssistantConnectionMessage: null
+		};
+	},
+
+	/**
+	 * Test the currently saved Music Assistant connection without modifying settings.
+	 */
+	testMusicAssistantConnection: async () => {
+		const connection = await testMusicAssistantConnectionWrapper();
+		return {
+			saved: false,
+			connectionStatus: null,
+			connectionMessage: null,
+			plexConnectionStatus: null,
+			plexConnectionMessage: null,
+			musicAssistantConnectionStatus: connection.connectionStatus,
+			musicAssistantConnectionMessage: connection.connectionMessage
 		};
 	}
 };
