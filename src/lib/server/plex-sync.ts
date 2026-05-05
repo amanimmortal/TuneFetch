@@ -20,7 +20,8 @@ import {
 	createPlaylist,
 	addToPlaylist,
 	getPlaylistItems,
-	getUserAccessToken
+	getUserAccessToken,
+	refreshLibrarySection
 } from './plex';
 import { decrypt, isEncrypted } from './crypto';
 
@@ -465,6 +466,43 @@ export function triggerSyncForArtist(lidarrArtistId: number): void {
 	for (const { id } of playlists) {
 		enqueuePlexSync(id);
 	}
+}
+
+/**
+ * After any TuneFetch action that adds, replaces, or moves files in a
+ * mirror destination, tell Plex to rescan the relevant library and queue a
+ * delayed sync of any playlists that reference this artist.
+ *
+ * This is the single canonical entry point — call it from every code path
+ * that touches files (webhook, backfill, refresh-stale, verify discover-new,
+ * etc.) so Plex always sees fresh content and our playlist syncs find it.
+ *
+ * Properties:
+ *   - Fire-and-forget. Never blocks the caller.
+ *   - Silent no-op when no Plex playlists reference this artist (the
+ *     section query returns []).
+ *   - Internal dedup via _retryTimers: repeated calls for the same
+ *     artist within one backoff window do not stack timers.
+ */
+export function triggerPlexRefreshAndSync(lidarrArtistId: number, source = 'mirror'): void {
+	const sectionIds = getSectionIdsForArtist(lidarrArtistId);
+	if (sectionIds.length === 0) return; // No Plex playlists configured for this artist
+
+	// Fire-and-forget: refresh each relevant library section so Plex
+	// re-indexes the files we just placed there.
+	for (const sectionId of sectionIds) {
+		refreshLibrarySection(sectionId)
+			.then(() => {
+				console.log(`[${source}] Plex library refresh triggered for section ${sectionId} (artist ${lidarrArtistId})`);
+			})
+			.catch((err) => {
+				console.warn(`[${source}] Plex library refresh failed for section ${sectionId} (artist ${lidarrArtistId}):`, err);
+			});
+	}
+
+	// Queue delayed sync attempts for any playlists that reference this artist.
+	// The retry backoff handles the gap between Plex refresh and file indexing.
+	triggerSyncForArtist(lidarrArtistId);
 }
 
 /**

@@ -22,6 +22,7 @@ import {
   type LidarrTrack,
   type LidarrTrackFile
 } from './lidarr';
+import { triggerPlexRefreshAndSync } from './plex-sync';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -686,6 +687,13 @@ async function _runBackfill(
       ).run(listItemId);
       console.log(`[mirror] backfill listItem=${listItemId}: complete — ${successCount} file(s) copied → synced`);
     }
+
+    // If we copied anything (even partially), tell Plex to rescan so the new
+    // files become visible to playlist sync. One trigger per backfill run —
+    // the helper handles per-section refresh and dedups delayed sync timers.
+    if (successCount > 0) {
+      triggerPlexRefreshAndSync(lidarrArtistId, 'mirror.backfill');
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[mirror] backfill listItem=${listItemId}: fatal error —`, err);
@@ -747,10 +755,22 @@ export function enqueueRefreshStaleAll(): number {
   // artist hit Lidarr (track files + tracks) only once.
   const ctx = newResolveContext();
 
+  // Collect the unique artists whose files we're about to re-copy and tell
+  // Plex to rescan once per artist. We fire these now (rather than per-job)
+  // so we don't hit Plex with one HTTP call per stale file. The refresh
+  // helper queues a delayed sync with a 30s+ backoff, which gives the async
+  // copy jobs time to land before Plex sync looks for the files.
+  const dirtyArtists = new Set<number>();
+
   for (const row of staleRows) {
+    if (row.lidarr_artist_id != null) dirtyArtists.add(row.lidarr_artist_id);
     const job = _refreshSingleStale(row, ctx);
     _activeJobs.add(job);
     job.finally(() => _activeJobs.delete(job)).catch(() => {});
+  }
+
+  for (const artistId of dirtyArtists) {
+    triggerPlexRefreshAndSync(artistId, 'mirror.refreshStale');
   }
 
   return staleRows.length;
@@ -846,6 +866,12 @@ export async function verifyMirrorFiles(): Promise<VerifyReport> {
     discovered: 0
   };
 
+  // Track artists whose mirror trees we touched (recopied content or added
+  // new files). One Plex refresh + delayed sync per artist after the pass
+  // completes — keeps the load on Plex bounded even if the verify pass
+  // touches thousands of files.
+  const dirtyArtists = new Set<number>();
+
   // ORDER BY list_item_id keeps rows for the same artist contiguous, which
   // maximizes the cache hit rate as we walk the table.
   const rows = db
@@ -915,6 +941,7 @@ export async function verifyMirrorFiles(): Promise<VerifyReport> {
               WHERE id = ?`
           ).run(row.id);
           report.filesRecopied++;
+          if (row.lidarr_artist_id != null) dirtyArtists.add(row.lidarr_artist_id);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           db.prepare(
@@ -1066,6 +1093,7 @@ export async function verifyMirrorFiles(): Promise<VerifyReport> {
           trackId: trackMap.get(file.id)
         });
         report.discovered++;
+        dirtyArtists.add(c.lidarr_artist_id);
         console.log(
           `[mirror] verify discover-new: copied missing artist file for list_item ${c.list_item_id} ` +
           `(${file.path})`
@@ -1087,6 +1115,14 @@ export async function verifyMirrorFiles(): Promise<VerifyReport> {
         report.errors++;
       }
     }
+  }
+
+  // Tell Plex to rescan for any artist whose mirror tree we touched (recopied
+  // an existing file or discovered a new one). Done once per artist at the
+  // end of the pass so a verify run that touches thousands of files results
+  // in at most one refresh per affected library section.
+  for (const artistId of dirtyArtists) {
+    triggerPlexRefreshAndSync(artistId, 'mirror.verify');
   }
 
   return report;
