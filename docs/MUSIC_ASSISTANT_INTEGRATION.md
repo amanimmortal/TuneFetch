@@ -85,8 +85,8 @@ typically `"library"` — confirm by inspecting the `Playlist.provider` field re
    check for duplicates. Determines whether we need to diff before adding.
 2. **What does `playlist_tracks` look like over HTTP?** It's typed as `AsyncGenerator` server-side.
    Most likely the HTTP transport collects it into a JSON array; if it streams, we may need to use
-   the WebSocket transport (`wss://host/ws`, or `ws://` for plaintext-only LAN deployments) for
-   that one call.
+   MA's WebSocket transport at `/ws` for that one call (use the secure `wss` scheme; fall back to
+   plaintext only on a trusted LAN where MA itself is plaintext).
 
 ---
 
