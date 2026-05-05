@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { getDb } from './db';
 import { getSetting, SETTING_KEYS } from './settings';
 import { cleanupExpiredSessions } from './auth';
-import { systemStatus } from './lidarr';
+import { systemStatus, listArtists, getTrackFiles } from './lidarr';
 import {
   markMissingMirrorsStale,
   verifyMirrorFiles,
@@ -53,12 +53,108 @@ async function walkDir(
 }
 
 /**
+ * Normalize a directory path for set-membership comparison. Strips trailing
+ * "/" so "/music/Kids" and "/music/Kids/" compare equal — Lidarr's
+ * rootFolderPath sometimes carries a trailing slash and the lists table
+ * doesn't, which would otherwise cause spurious misses.
+ *
+ * Kept deliberately small: TuneFetch is a Linux/Docker deployment, so we
+ * don't normalize case, separators, or unicode. If those ever matter, this
+ * is the place to widen the rule.
+ */
+function normalizeRoot(p: string): string {
+  return p.replace(/\/+$/, '');
+}
+
+/**
+ * Concurrency-limited parallel iteration. Runs `worker(item)` for each item
+ * with at most `limit` calls in flight. Failures are surfaced via the per-
+ * item promise — the orchestrating caller is responsible for catching.
+ *
+ * Inlined because it's the only place we currently need it; a shared util
+ * isn't justified yet.
+ */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  worker: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      results[i] = await worker(items[i]!);
+    }
+  });
+  await Promise.all(runners);
+  return results;
+}
+
+/**
+ * Build the set of file paths Lidarr currently knows about under any of the
+ * given root folders. A "Lidarr-managed primary" file lives at one of these
+ * paths even when TuneFetch never copied it (e.g. the user matched an
+ * "unmapped file" in Lidarr to add a manually-placed track), and should not
+ * be treated as an orphan.
+ *
+ * Soft-fail by design: if Lidarr is unreachable mid-scan or a single artist
+ * lookup errors, we log and proceed with whatever paths we did collect. The
+ * worst-case effect is over-flagging some orphans, which is recoverable —
+ * the user can dismiss them or rerun the scan when Lidarr is back.
+ */
+async function collectLidarrManagedPaths(rootSet: Set<string>): Promise<Set<string>> {
+  const paths = new Set<string>();
+  let artists;
+  try {
+    artists = await listArtists();
+  } catch (err) {
+    console.warn(
+      '[scheduler] Orphan scan: listArtists failed, skipping Lidarr-managed filter:',
+      err
+    );
+    return paths;
+  }
+
+  // Normalize on both sides so a trailing-slash mismatch doesn't drop artists.
+  const normalizedRootSet = new Set(Array.from(rootSet, normalizeRoot));
+  const relevant = artists.filter((a) =>
+    normalizedRootSet.has(normalizeRoot(a.rootFolderPath))
+  );
+
+  // Cap concurrency at 8: a local Lidarr handles this comfortably and the
+  // orphan scan stays fast even on large libraries (a few hundred artists
+  // → ~tens of seconds rather than minutes of sequential round-trips).
+  const CONCURRENCY = 8;
+  await mapWithConcurrency(relevant, CONCURRENCY, async (artist) => {
+    try {
+      const trackFiles = await getTrackFiles(artist.id);
+      for (const f of trackFiles) {
+        paths.add(f.path);
+      }
+    } catch (err) {
+      console.warn(
+        `[scheduler] Orphan scan: getTrackFiles failed for artist ${artist.id} ` +
+        `("${artist.artistName}"); files for this artist may be over-flagged:`,
+        err
+      );
+    }
+  });
+  return paths;
+}
+
+/**
  * Run the orphan detection scan.
  *
  * Scans all root folders that TuneFetch has used as mirror destinations
  * (i.e. folders that appear in mirror_files rows via their list_item -> list
- * join). Any file found under those folders that has no matching
- * mirror_files.mirror_path record is recorded in orphan_files.
+ * join). A file under one of those folders is reported as an orphan only if
+ * **none** of these claim it:
+ *   1. mirror_files.mirror_path  (TuneFetch-tracked mirror)
+ *   2. orphan_ignore_list        (user-dismissed)
+ *   3. Lidarr's trackfile list   (Lidarr-managed primary — covers manually-
+ *                                  placed files matched via "unmapped files")
  *
  * Orphans are flagged for user review only — they are never auto-deleted.
  * The table is fully replaced on each scan so stale results don't accumulate.
@@ -102,23 +198,36 @@ export async function runOrphanScan(): Promise<void> {
     ).map((r) => r.file_path)
   );
 
+  // Build a Set of paths Lidarr currently tracks under any of the secondary
+  // roots. These are valid Lidarr-managed files that TuneFetch never copied
+  // (e.g. files placed manually and adopted via Lidarr's unmapped-files UI).
+  const rootSet = new Set(secondaryRoots.map((r) => r.root_folder_path));
+  const lidarrManagedPaths = await collectLidarrManagedPaths(rootSet);
+
   // Replace previous scan results.
   db.prepare('DELETE FROM orphan_files').run();
 
   let orphanCount = 0;
+  let lidarrCovered = 0;
 
   for (const { root_folder_path } of secondaryRoots) {
     await walkDir(root_folder_path, async (filePath) => {
-      if (!knownPaths.has(filePath) && !ignoredPaths.has(filePath)) {
-        db.prepare(
-          `INSERT OR REPLACE INTO orphan_files (file_path, root_folder) VALUES (?, ?)`
-        ).run(filePath, root_folder_path);
-        orphanCount++;
+      if (knownPaths.has(filePath) || ignoredPaths.has(filePath)) return;
+      if (lidarrManagedPaths.has(filePath)) {
+        lidarrCovered++;
+        return;
       }
+      db.prepare(
+        `INSERT OR REPLACE INTO orphan_files (file_path, root_folder) VALUES (?, ?)`
+      ).run(filePath, root_folder_path);
+      orphanCount++;
     });
   }
 
-  console.log(`[scheduler] Orphan scan complete. Found ${orphanCount} orphan(s).`);
+  console.log(
+    `[scheduler] Orphan scan complete. Found ${orphanCount} orphan(s); ` +
+    `${lidarrCovered} file(s) skipped because Lidarr already manages them.`
+  );
 
   // Check all active mirror_files exist on disk — mark missing ones as stale
   // so "Refresh Stale" can re-copy them (handles files deleted by Lidarr etc.)
