@@ -19,8 +19,7 @@ import type { RequestHandler } from './$types';
 import { getDb } from '$lib/server/db';
 import { env } from '$lib/server/env';
 import { mirrorTrackFile, remirrorUpgrade } from '$lib/server/mirror';
-import { refreshLibrarySection } from '$lib/server/plex';
-import { triggerSyncForArtist, getSectionIdsForArtist } from '$lib/server/plex-sync';
+import { triggerPlexRefreshAndSync } from '$lib/server/plex-sync';
 
 // ── Lidarr webhook payload types ──────────────────────────────────────────────
 
@@ -128,7 +127,7 @@ export const POST: RequestHandler = async ({ request }) => {
     await Promise.allSettled(tasks);
 
     // Trigger Plex library refresh + delayed sync for affected playlists
-    _triggerPlexSync(lidarrArtistId);
+    triggerPlexRefreshAndSync(lidarrArtistId, 'webhook');
 
     return json({ ok: true, event: 'Upgrade', tasks: tasks.length });
   }
@@ -219,7 +218,7 @@ export const POST: RequestHandler = async ({ request }) => {
   await Promise.allSettled(tasks);
 
   // Trigger Plex library refresh + delayed sync for affected playlists
-  _triggerPlexSync(lidarrArtistId);
+  triggerPlexRefreshAndSync(lidarrArtistId, 'webhook');
 
   return json({
     ok: true,
@@ -229,29 +228,3 @@ export const POST: RequestHandler = async ({ request }) => {
   });
 };
 
-/**
- * After a Lidarr download, kick off a Plex library scan and queue delayed
- * playlist syncs. Runs in the background (fire-and-forget) so the webhook
- * response isn't blocked.
- */
-function _triggerPlexSync(lidarrArtistId: number): void {
-  // Get the library section IDs for each Plex user affected by this artist.
-  // Each user may have their own separate music library in Plex.
-  const sectionIds = getSectionIdsForArtist(lidarrArtistId);
-  if (sectionIds.length === 0) return; // No Plex playlists configured for this artist
-
-  // Fire-and-forget: refresh each relevant library section
-  for (const sectionId of sectionIds) {
-    refreshLibrarySection(sectionId)
-      .then(() => {
-        console.log('[webhook] Plex library refresh triggered for section', sectionId);
-      })
-      .catch((err) => {
-        console.warn('[webhook] Plex library refresh failed for section', sectionId, err);
-      });
-  }
-
-  // Queue delayed sync attempts for any playlists that reference this artist.
-  // The retry backoff handles the gap between Plex refresh and file indexing.
-  triggerSyncForArtist(lidarrArtistId);
-}
