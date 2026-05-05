@@ -82,18 +82,24 @@ export function getDb(): Database.Database {
   // plex_user_name). SQLite can't drop a UNIQUE constraint in place, so
   // recreate the table if the old index is still there.
   {
-    const idxRows = db
-      .prepare("PRAGMA index_list(plex_user_mappings)")
-      .all() as Array<{ name: string; unique: number; origin: string }>;
+    const idxRows = db.pragma('index_list(plex_user_mappings)') as Array<{
+      name: string; unique: number; origin: string;
+    }>;
     // The auto-generated single-column UNIQUE index appears as
     // sqlite_autoindex_plex_user_mappings_<n>. Detect by introspecting each
     // unique index's columns — exactly one column == root_folder_path means
     // it's the legacy constraint we need to drop.
-    const idxColStmt = db.prepare("PRAGMA index_info(?)");
+    //
+    // PRAGMA does not accept bind parameters, so we have to interpolate the
+    // index name into the pragma string. Index names come from a previous
+    // PRAGMA call (i.e. SQLite-controlled identifiers), but guard with a
+    // conservative pattern as defense-in-depth.
+    const safeIdxName = /^[A-Za-z0-9_]+$/;
     let needsRecreate = false;
     for (const idx of idxRows) {
       if (!idx.unique) continue;
-      const cols = idxColStmt.all(idx.name) as Array<{ name: string }>;
+      if (!safeIdxName.test(idx.name)) continue;
+      const cols = db.pragma(`index_info(${idx.name})`) as Array<{ name: string }>;
       if (cols.length === 1 && cols[0]?.name === 'root_folder_path') {
         needsRecreate = true;
         break;
