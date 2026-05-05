@@ -97,15 +97,48 @@ export const POST: RequestHandler = async ({ request, fetch: svelteKitFetch }) =
 				if (!root_folder_path || !plex_user_name || !plex_user_token) {
 					throw error(400, 'root_folder_path, plex_user_name, and plex_user_token are required');
 				}
-				db.prepare(
-					`INSERT INTO plex_user_mappings (root_folder_path, plex_user_name, plex_user_token, plex_user_id, library_section_id)
-					 VALUES (?, ?, ?, ?, ?)
-					 ON CONFLICT(root_folder_path) DO UPDATE SET
-					   plex_user_name = excluded.plex_user_name,
-					   plex_user_token = excluded.plex_user_token,
-					   plex_user_id = excluded.plex_user_id,
-					   library_section_id = excluded.library_section_id`
-				).run(root_folder_path, plex_user_name, encrypt(plex_user_token), plex_user_id ?? null, library_section_id ?? '');
+				// Multiple Plex users can share a single Lidarr root (e.g. several
+				// kids on one tree). Uniqueness lives on (root_folder_path,
+				// plex_user_name), but we resolve identity by plex_user_id when
+				// it's available so a Plex rename updates the existing row in
+				// place rather than creating a duplicate.
+				//
+				// Order of preference:
+				//   1. If plex_user_id is provided AND a row exists for
+				//      (root, plex_user_id), update it (handles rename).
+				//   2. Otherwise INSERT ... ON CONFLICT(root, plex_user_name)
+				//      DO UPDATE (handles legacy rows without plex_user_id and
+				//      first-time saves).
+				const encryptedToken = encrypt(plex_user_token);
+				const sectionId = library_section_id ?? '';
+				let updatedById = false;
+				if (plex_user_id) {
+					const existing = db
+						.prepare(
+							'SELECT id FROM plex_user_mappings WHERE root_folder_path = ? AND plex_user_id = ?'
+						)
+						.get(root_folder_path, plex_user_id) as { id: number } | undefined;
+					if (existing) {
+						db.prepare(
+							`UPDATE plex_user_mappings
+								SET plex_user_name = ?,
+									plex_user_token = ?,
+									library_section_id = ?
+								WHERE id = ?`
+						).run(plex_user_name, encryptedToken, sectionId, existing.id);
+						updatedById = true;
+					}
+				}
+				if (!updatedById) {
+					db.prepare(
+						`INSERT INTO plex_user_mappings (root_folder_path, plex_user_name, plex_user_token, plex_user_id, library_section_id)
+						 VALUES (?, ?, ?, ?, ?)
+						 ON CONFLICT(root_folder_path, plex_user_name) DO UPDATE SET
+						   plex_user_token = excluded.plex_user_token,
+						   plex_user_id = excluded.plex_user_id,
+						   library_section_id = excluded.library_section_id`
+					).run(root_folder_path, plex_user_name, encryptedToken, plex_user_id ?? null, sectionId);
+				}
 				return json({ ok: true });
 			}
 
