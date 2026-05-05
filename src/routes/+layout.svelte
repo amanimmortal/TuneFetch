@@ -15,10 +15,8 @@
     { href: '/settings', label: 'Settings' }
   ];
 
-  function isActive(href: string): boolean {
-    if (href === '/') return pathname === '/';
-    return pathname === href || pathname.startsWith(href + '/');
-  }
+  const isActive = (p: string, href: string) =>
+    href === '/' ? p === '/' : p === href || p.startsWith(href + '/');
 </script>
 
 {#if chromeless}
@@ -32,13 +30,14 @@
         </a>
         <nav class="flex items-center gap-1">
           {#each navItems as item}
+            {@const active = isActive(pathname, item.href)}
             <a
               href={item.href}
               class="rounded-md px-3 py-1.5 text-sm font-medium no-underline transition-colors"
-              class:bg-slate-800={isActive(item.href)}
-              class:text-slate-100={isActive(item.href)}
-              class:text-slate-400={!isActive(item.href)}
-              class:hover:text-slate-100={!isActive(item.href)}
+              class:bg-slate-800={active}
+              class:text-slate-100={active}
+              class:text-slate-400={!active}
+              class:hover:text-slate-100={!active}
             >
               {item.label}
             </a>
