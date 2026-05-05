@@ -160,6 +160,10 @@ CREATE TABLE IF NOT EXISTS plex_playlists (
   -- MA's playlist item_id once we've created/matched it. Null until first MA
   -- sync. Persisted so subsequent syncs don't have to look up by name.
   ma_playlist_item_id TEXT,
+  -- MA's provider domain/instance for the playlist (typically 'library' for
+  -- MA-native playlists). Stored alongside ma_playlist_item_id so cached-id
+  -- lookups don't have to assume a provider.
+  ma_playlist_provider TEXT,
   created_at          DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_plex_playlists_list ON plex_playlists(list_id);

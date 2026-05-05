@@ -78,11 +78,16 @@ export function getDb(): Database.Database {
 
   // Migration: ma_playlist_item_id stores the Music Assistant playlist's
   // item_id after first creation, so subsequent MA syncs skip the by-name
-  // lookup and survive renames in MA's UI.
+  // lookup and survive renames in MA's UI. ma_playlist_provider stores the
+  // provider domain/instance alongside it so cached-id lookups use the
+  // actual provider rather than assuming 'library'.
   const plexPlaylistCols = (db.pragma('table_info(plex_playlists)') as Array<{ name: string }>)
     .map((c) => c.name);
   if (!plexPlaylistCols.includes('ma_playlist_item_id')) {
     db.exec('ALTER TABLE plex_playlists ADD COLUMN ma_playlist_item_id TEXT');
+  }
+  if (!plexPlaylistCols.includes('ma_playlist_provider')) {
+    db.exec('ALTER TABLE plex_playlists ADD COLUMN ma_playlist_provider TEXT');
   }
 
   // Migrate plex_user_mappings: drop the old single-column UNIQUE on

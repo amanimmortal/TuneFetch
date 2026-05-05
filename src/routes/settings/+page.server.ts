@@ -1,6 +1,11 @@
 import { fail } from '@sveltejs/kit';
 import type { Actions, PageServerLoad } from './$types';
-import { SETTING_KEYS, getAllSettings, setSetting } from '$lib/server/settings';
+import {
+	SETTING_KEYS,
+	getAllSettings,
+	setSetting,
+	isMusicAssistantConfigured
+} from '$lib/server/settings';
 import { systemStatus, LidarrError } from '$lib/server/lidarr';
 import { testConnection as testPlexConnection, PlexError, resetPlexCache } from '$lib/server/plex';
 import {
@@ -63,6 +68,15 @@ async function testPlexConnectionWrapper(fetchFn?: typeof fetch): Promise<Connec
 }
 
 async function testMusicAssistantConnectionWrapper(): Promise<ConnectionResult> {
+	// Check configuration up front rather than catching the throw-from-getter
+	// pattern — keeps the unconfigured/error split robust against changes to
+	// the error message string.
+	if (!isMusicAssistantConfigured()) {
+		return {
+			connectionStatus: 'unconfigured',
+			connectionMessage: 'Music Assistant URL and bearer token are required.'
+		};
+	}
 	try {
 		await testMusicAssistantConnection();
 		return {
@@ -70,12 +84,6 @@ async function testMusicAssistantConnectionWrapper(): Promise<ConnectionResult> 
 			connectionMessage: 'Connected to Music Assistant.'
 		};
 	} catch (err: unknown) {
-		if (err instanceof Error && err.message.includes('must be configured')) {
-			return {
-				connectionStatus: 'unconfigured',
-				connectionMessage: err.message
-			};
-		}
 		const message =
 			err instanceof MusicAssistantError
 				? err.message
@@ -188,19 +196,12 @@ export const actions: Actions = {
 						connectionMessage: 'Plex URL and admin token are required to test the connection.'
 					};
 
-		// Test Music Assistant connection. The token may have been left blank
-		// to keep the existing one — check the stored value to know whether
-		// MA is configured rather than relying on the form input.
-		const maConfigured =
-			Boolean(musicAssistantUrl) &&
-			(Boolean(musicAssistantToken) || getAllSettings()[SETTING_KEYS.MUSIC_ASSISTANT_TOKEN]);
-		const musicAssistantConnection = maConfigured
-			? await testMusicAssistantConnectionWrapper()
-			: {
-					connectionStatus: 'unconfigured' as const,
-					connectionMessage:
-						'Music Assistant URL and bearer token are required to test the connection.'
-				};
+		// Test Music Assistant connection. The wrapper checks
+		// isMusicAssistantConfigured() internally and returns a clean
+		// "unconfigured" result when URL or token is missing, so we don't have
+		// to re-derive that here (and don't have to worry about whether the
+		// token field was left blank to keep the existing one).
+		const musicAssistantConnection = await testMusicAssistantConnectionWrapper();
 
 		return {
 			saved: true,

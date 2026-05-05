@@ -63,7 +63,7 @@ export async function syncPlaylistToMusicAssistant(
 
 	const ppRow = db
 		.prepare(
-			`SELECT id, list_id, playlist_title, ma_playlist_item_id
+			`SELECT id, list_id, playlist_title, ma_playlist_item_id, ma_playlist_provider
 			   FROM plex_playlists WHERE id = ?`
 		)
 		.get(plexPlaylistDbId) as
@@ -72,6 +72,7 @@ export async function syncPlaylistToMusicAssistant(
 				list_id: number;
 				playlist_title: string;
 				ma_playlist_item_id: string | null;
+				ma_playlist_provider: string | null;
 		  }
 		| undefined;
 	if (!ppRow) throw new Error(`plex_playlists row ${plexPlaylistDbId} not found`);
@@ -110,7 +111,10 @@ export async function syncPlaylistToMusicAssistant(
 		existingUris = new Set();
 	}
 
-	const foundUris: string[] = [];
+	// Dedupe via Set: two distinct list_items can resolve to the same MA track
+	// (duplicates in the source list, or different MBIDs sharing artist+title),
+	// and we don't want to send the same URI twice.
+	const foundUris = new Set<string>();
 	await runWithConcurrency(tracks, SEARCH_CONCURRENCY, async (track) => {
 		try {
 			const uri = await searchTrack(track.artist_name, track.title);
@@ -125,7 +129,7 @@ export async function syncPlaylistToMusicAssistant(
 			if (existingUris.has(uri)) {
 				result.alreadyInMa++;
 			} else {
-				foundUris.push(uri);
+				foundUris.add(uri);
 			}
 		} catch (err) {
 			console.error(
@@ -137,10 +141,11 @@ export async function syncPlaylistToMusicAssistant(
 		}
 	});
 
-	if (foundUris.length > 0) {
+	if (foundUris.size > 0) {
+		const urisToAdd = Array.from(foundUris);
 		try {
-			await addTracksToPlaylist(maPlaylistId, foundUris);
-			result.added = foundUris.length;
+			await addTracksToPlaylist(maPlaylistId, urisToAdd);
+			result.added = urisToAdd.length;
 		} catch (err) {
 			console.error(
 				`[ma-sync] Failed to add tracks to MA playlist "${ppRow.playlist_title}":`,
@@ -155,18 +160,35 @@ export async function syncPlaylistToMusicAssistant(
 
 /**
  * Resolve the MA playlist for this row. Order: stored id → name lookup → create.
- * Persists the id on first creation/match so subsequent syncs skip the lookup.
+ * Persists both the id and provider on first creation/match so subsequent syncs
+ * skip the lookup AND don't have to assume a provider.
  */
 async function ensureMaPlaylist(
 	plexPlaylistDbId: number,
-	ppRow: { playlist_title: string; ma_playlist_item_id: string | null }
+	ppRow: {
+		playlist_title: string;
+		ma_playlist_item_id: string | null;
+		ma_playlist_provider: string | null;
+	}
 ): Promise<{ itemId: string; provider: string } | null> {
 	const db = getDb();
 
 	if (ppRow.ma_playlist_item_id) {
+		// Use the stored provider when available; fall back to 'library' for
+		// rows migrated from before the provider column existed.
+		const lookupProvider = ppRow.ma_playlist_provider ?? 'library';
 		try {
-			const existing = await getPlaylist(ppRow.ma_playlist_item_id, 'library');
-			if (existing) return { itemId: existing.item_id, provider: existing.provider };
+			const existing = await getPlaylist(ppRow.ma_playlist_item_id, lookupProvider);
+			if (existing) {
+				// Backfill the provider column for legacy rows so the next sync
+				// uses the canonical value.
+				if (!ppRow.ma_playlist_provider) {
+					db.prepare(
+						'UPDATE plex_playlists SET ma_playlist_provider = ? WHERE id = ?'
+					).run(existing.provider, plexPlaylistDbId);
+				}
+				return { itemId: existing.item_id, provider: existing.provider };
+			}
 			console.warn(
 				`[ma-sync] Stored MA playlist id ${ppRow.ma_playlist_item_id} no longer exists; recreating.`
 			);
@@ -184,10 +206,9 @@ async function ensureMaPlaylist(
 	try {
 		const found = await findPlaylistByName(ppRow.playlist_title);
 		if (found) {
-			db.prepare('UPDATE plex_playlists SET ma_playlist_item_id = ? WHERE id = ?').run(
-				found.item_id,
-				plexPlaylistDbId
-			);
+			db.prepare(
+				'UPDATE plex_playlists SET ma_playlist_item_id = ?, ma_playlist_provider = ? WHERE id = ?'
+			).run(found.item_id, found.provider, plexPlaylistDbId);
 			return { itemId: found.item_id, provider: found.provider };
 		}
 	} catch (err) {
@@ -197,10 +218,9 @@ async function ensureMaPlaylist(
 
 	try {
 		const created = await createPlaylist(ppRow.playlist_title);
-		db.prepare('UPDATE plex_playlists SET ma_playlist_item_id = ? WHERE id = ?').run(
-			created.item_id,
-			plexPlaylistDbId
-		);
+		db.prepare(
+			'UPDATE plex_playlists SET ma_playlist_item_id = ?, ma_playlist_provider = ? WHERE id = ?'
+		).run(created.item_id, created.provider, plexPlaylistDbId);
 		return { itemId: created.item_id, provider: created.provider };
 	} catch (err) {
 		console.error(`[ma-sync] Failed to create MA playlist "${ppRow.playlist_title}":`, err);
