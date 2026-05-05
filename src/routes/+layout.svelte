@@ -5,8 +5,7 @@
 
   export let data: LayoutData;
 
-  $: pathname = $page.url.pathname;
-  $: chromeless = pathname === '/login' || pathname === '/setup';
+  $: chromeless = $page.url.pathname === '/login' || $page.url.pathname === '/setup';
 
   const navItems = [
     { href: '/', label: 'Search' },
@@ -14,11 +13,6 @@
     { href: '/mirrors', label: 'Mirror Health' },
     { href: '/settings', label: 'Settings' }
   ];
-
-  function isActive(href: string): boolean {
-    if (href === '/') return pathname === '/';
-    return pathname === href || pathname.startsWith(href + '/');
-  }
 </script>
 
 {#if chromeless}
@@ -32,13 +26,14 @@
         </a>
         <nav class="flex items-center gap-1">
           {#each navItems as item}
+            {@const active = item.href === '/' ? $page.url.pathname === '/' : $page.url.pathname === item.href || $page.url.pathname.startsWith(item.href + '/')}
             <a
               href={item.href}
               class="rounded-md px-3 py-1.5 text-sm font-medium no-underline transition-colors"
-              class:bg-slate-800={isActive(item.href)}
-              class:text-slate-100={isActive(item.href)}
-              class:text-slate-400={!isActive(item.href)}
-              class:hover:text-slate-100={!isActive(item.href)}
+              class:bg-slate-800={active}
+              class:text-slate-100={active}
+              class:text-slate-400={!active}
+              class:hover:text-slate-100={!active}
             >
               {item.label}
             </a>
