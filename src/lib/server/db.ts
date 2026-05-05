@@ -76,6 +76,56 @@ export function getDb(): Database.Database {
     'CREATE INDEX IF NOT EXISTS idx_mirror_files_track_file ON mirror_files(lidarr_track_file_id)'
   );
 
+  // Migrate plex_user_mappings: drop the old single-column UNIQUE on
+  // root_folder_path so multiple Plex users (e.g. several kids) can share a
+  // single Lidarr root folder. Replaced with UNIQUE(root_folder_path,
+  // plex_user_name). SQLite can't drop a UNIQUE constraint in place, so
+  // recreate the table if the old index is still there.
+  {
+    const idxRows = db
+      .prepare("PRAGMA index_list(plex_user_mappings)")
+      .all() as Array<{ name: string; unique: number; origin: string }>;
+    // The auto-generated single-column UNIQUE index appears as
+    // sqlite_autoindex_plex_user_mappings_<n>. Detect by introspecting each
+    // unique index's columns — exactly one column == root_folder_path means
+    // it's the legacy constraint we need to drop.
+    const idxColStmt = db.prepare("PRAGMA index_info(?)");
+    let needsRecreate = false;
+    for (const idx of idxRows) {
+      if (!idx.unique) continue;
+      const cols = idxColStmt.all(idx.name) as Array<{ name: string }>;
+      if (cols.length === 1 && cols[0]?.name === 'root_folder_path') {
+        needsRecreate = true;
+        break;
+      }
+    }
+    if (needsRecreate) {
+      db.exec(`
+        BEGIN;
+        CREATE TABLE plex_user_mappings_new (
+          id                    INTEGER PRIMARY KEY,
+          root_folder_path      TEXT NOT NULL,
+          plex_user_name        TEXT NOT NULL,
+          plex_user_token       TEXT NOT NULL,
+          plex_user_id          INTEGER,
+          library_section_id    TEXT NOT NULL DEFAULT '',
+          created_at            DATETIME DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(root_folder_path, plex_user_name)
+        );
+        INSERT INTO plex_user_mappings_new
+          (id, root_folder_path, plex_user_name, plex_user_token,
+           plex_user_id, library_section_id, created_at)
+        SELECT id, root_folder_path, plex_user_name, plex_user_token,
+               plex_user_id, library_section_id, created_at
+          FROM plex_user_mappings;
+        DROP TABLE plex_user_mappings;
+        ALTER TABLE plex_user_mappings_new RENAME TO plex_user_mappings;
+        COMMIT;
+      `);
+      console.log('[migration] plex_user_mappings: dropped single-column UNIQUE on root_folder_path; replaced with UNIQUE(root_folder_path, plex_user_name).');
+    }
+  }
+
   // Migrate artist_ownership: add ON DELETE SET NULL to owner_list_id FK.
   // SQLite does not support ALTER TABLE ... ALTER COLUMN, so recreate if needed.
   {

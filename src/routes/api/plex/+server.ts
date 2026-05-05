@@ -97,11 +97,15 @@ export const POST: RequestHandler = async ({ request, fetch: svelteKitFetch }) =
 				if (!root_folder_path || !plex_user_name || !plex_user_token) {
 					throw error(400, 'root_folder_path, plex_user_name, and plex_user_token are required');
 				}
+				// Conflict on (root_folder_path, plex_user_name) so re-saving the
+				// same user for the same root updates in place, but a *different*
+				// user for the same root is a separate row. This is what allows
+				// multiple kids to share a single "kids music" root folder, each
+				// receiving their own Plex playlists.
 				db.prepare(
 					`INSERT INTO plex_user_mappings (root_folder_path, plex_user_name, plex_user_token, plex_user_id, library_section_id)
 					 VALUES (?, ?, ?, ?, ?)
-					 ON CONFLICT(root_folder_path) DO UPDATE SET
-					   plex_user_name = excluded.plex_user_name,
+					 ON CONFLICT(root_folder_path, plex_user_name) DO UPDATE SET
 					   plex_user_token = excluded.plex_user_token,
 					   plex_user_id = excluded.plex_user_id,
 					   library_section_id = excluded.library_section_id`

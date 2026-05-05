@@ -126,13 +126,15 @@ CREATE TABLE IF NOT EXISTS orphan_ignore_list (
   ignored_at  DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
--- Maps Lidarr root folder paths to Plex managed users.
--- A user in Plex maps to a root folder in Lidarr (e.g. "Ben" → /mnt/music/ben).
--- This bridge lets TuneFetch know which Plex user should receive playlists
--- for lists that target a specific root folder path.
+-- Maps Lidarr root folder paths to Plex users.
+-- A single root folder can be shared by multiple Plex users — e.g. a "kids"
+-- music tree consumed by both Finn and Theo, each of whom needs their own
+-- per-user Plex playlists. Uniqueness is on (root_folder_path, plex_user_name)
+-- so the same human cannot be added twice for one root, but multiple users
+-- for the same root are allowed.
 CREATE TABLE IF NOT EXISTS plex_user_mappings (
   id                    INTEGER PRIMARY KEY,
-  root_folder_path      TEXT NOT NULL UNIQUE,
+  root_folder_path      TEXT NOT NULL,
   plex_user_name        TEXT NOT NULL,
   plex_user_token       TEXT NOT NULL,
   -- Numeric plex.tv home user ID — used to get a fresh switch token at sync time.
@@ -140,7 +142,8 @@ CREATE TABLE IF NOT EXISTS plex_user_mappings (
   -- The Plex music library section ID for this user.
   -- Each user/family group may have a separate music library in Plex.
   library_section_id    TEXT NOT NULL DEFAULT '',
-  created_at            DATETIME DEFAULT CURRENT_TIMESTAMP
+  created_at            DATETIME DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(root_folder_path, plex_user_name)
 );
 
 -- Links a TuneFetch list to a Plex playlist for a specific user.

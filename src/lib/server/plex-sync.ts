@@ -102,10 +102,18 @@ export async function syncListToPlexPlaylist(
 	// Stored token is a fallback for legacy mappings that have no plex_user_id.
 	const storedToken = resolveToken(row.plex_user_token);
 
-	// Look up the library_section_id and plex_user_id via root_folder_path.
+	// Look up the library_section_id and plex_user_id for *this specific
+	// playlist's user* — multiple plex_user_mappings rows can now share a
+	// root_folder_path (e.g. several kids on the same kids tree), so we must
+	// disambiguate by plex_user_name.
 	const userMapping = db
-		.prepare('SELECT library_section_id, plex_user_id FROM plex_user_mappings WHERE root_folder_path = ?')
-		.get(row.list_root_folder_path) as (PlexUserMappingRow & { library_section_id: string }) | undefined;
+		.prepare(
+			`SELECT library_section_id, plex_user_id
+			   FROM plex_user_mappings
+			  WHERE root_folder_path = ? AND plex_user_name = ?`
+		)
+		.get(row.list_root_folder_path, row.plex_user_name) as
+		(PlexUserMappingRow & { library_section_id: string }) | undefined;
 
 	// Resolve the per-server access token via plex.tv shared_servers (or admin
 	// token if the mapped user is the server owner). This is the canonical
