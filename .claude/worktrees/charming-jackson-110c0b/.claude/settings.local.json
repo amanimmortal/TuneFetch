@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C /d/GitHub/TuneFetch fetch origin claude/charming-jackson-110c0b)",
+      "Bash(git -C /d/GitHub/TuneFetch checkout claude/charming-jackson-110c0b)",
+      "Bash(npm run *)",
+      "Bash(gh pr create --title 'fix\\(mirror\\): drop new index from schema.sql to unblock migrations' --body ' *)",
+      "Bash(gh api *)",
+      "Bash(gh pr *)",
+      "Bash(grep -E \"Error|d:\\\\\\\\\\\\\\\\GitHub.*ts\")"
+    ]
+  }
+}
