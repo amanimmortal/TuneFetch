@@ -53,6 +53,52 @@ interface MirrorCandidate {
   target_root: string;
 }
 
+// ── Upgrade matching ──────────────────────────────────────────────────────────
+
+/**
+ * Pair a deletedFile (the file Lidarr just replaced) with its replacement in
+ * trackFiles.
+ *
+ * The previous implementation had `?? trackFiles[0]` as a catch-all which is
+ * catastrophic for multi-track upgrades (e.g. an album re-encoded mp3 → flac
+ * where every relativePath changes extension). Every iteration would land on
+ * trackFiles[0], so all 9 destinations would be overwritten with track 1's
+ * content. We now require an explicit match and otherwise return `undefined`
+ * so the caller can mark the mirror stale and let the verify pass re-resolve.
+ *
+ * Match order:
+ *   1. Single-track upgrade (1 deleted, 1 new) — trivially the same file.
+ *   2. Exact relativePath match.
+ *   3. Same basename without extension (handles format upgrades like
+ *      `01-T.N.T.mp3` → `01-T.N.T.flac`).
+ */
+function matchUpgradeReplacement(
+  oldFile: WebhookTrackFile,
+  deletedFiles: WebhookTrackFile[],
+  trackFiles: WebhookTrackFile[]
+): WebhookTrackFile | undefined {
+  if (deletedFiles.length === 1 && trackFiles.length === 1) {
+    return trackFiles[0];
+  }
+
+  if (oldFile.relativePath) {
+    const exact = trackFiles.find((f) => f.relativePath === oldFile.relativePath);
+    if (exact) return exact;
+
+    const oldStem = stripExtension(oldFile.relativePath);
+    const stemMatch = trackFiles.find(
+      (f) => f.relativePath && stripExtension(f.relativePath) === oldStem
+    );
+    if (stemMatch) return stemMatch;
+  }
+
+  return undefined;
+}
+
+function stripExtension(p: string): string {
+  return p.replace(/\.[^./\\]+$/, '');
+}
+
 // ── Handler ───────────────────────────────────────────────────────────────────
 
 export const POST: RequestHandler = async ({ request }) => {
@@ -97,15 +143,7 @@ export const POST: RequestHandler = async ({ request }) => {
     const tasks: Promise<void>[] = [];
 
     for (const oldFile of deletedFiles) {
-      // Match the replacement file by relativePath if available, otherwise
-      // take the first new track file (single-track upgrades only have one).
-      const newFile =
-        trackFiles.find(
-          (f) =>
-            f.relativePath &&
-            oldFile.relativePath &&
-            f.relativePath === oldFile.relativePath
-        ) ?? trackFiles[0];
+      const newFile = matchUpgradeReplacement(oldFile, deletedFiles, trackFiles);
 
       if (newFile) {
         tasks.push(
@@ -116,6 +154,10 @@ export const POST: RequestHandler = async ({ request }) => {
       } else {
         // No matching new file -- mark existing mirrors as stale (match by
         // trackFileId for stability, fall back to path for legacy rows).
+        // The next verify pass will re-resolve the source via Lidarr.
+        console.warn(
+          `[webhook] No upgrade match for "${oldFile.path}" — marking mirrors stale for next verify.`
+        );
         db.prepare(
           `UPDATE mirror_files
               SET status = 'stale', updated_at = CURRENT_TIMESTAMP
