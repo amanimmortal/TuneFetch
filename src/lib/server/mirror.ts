@@ -14,6 +14,7 @@
 
 import { promises as fs, constants as fsConstants } from 'node:fs';
 import { dirname, relative, join, basename, isAbsolute } from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { getDb } from './db';
 import {
   getTrackFiles,
@@ -110,21 +111,31 @@ async function checkWritable(dir: string): Promise<void> {
 /**
  * Atomically copy a file from sourcePath to destPath.
  *
- * Creates all intermediate directories. Uses a `.tunefetch.tmp` temp file
- * alongside the destination, then renames it into place so a partial write
- * never leaves a corrupt destination file.
+ * Creates all intermediate directories. Writes to a uniquely-suffixed temp
+ * file alongside the destination, then renames it into place so a partial
+ * write never leaves a corrupt destination file.
+ *
+ * The temp suffix includes pid + random bytes so concurrent writers targeting
+ * the same destination (e.g. two verify passes that both think a destination
+ * is missing) don't collide on the same temp path. Without uniqueness, the
+ * second writer's rename races against the first writer's rename and produces
+ * spurious ENOENT errors when the temp it expects has already been consumed.
+ *
+ * The `finally` block unlinks the temp on every exit path so a failure mid-
+ * copy never leaves orphan `.tunefetch.<pid>.<hex>.tmp` files alongside user
+ * media. On success the rename has already consumed the temp, so the unlink
+ * is a no-op (suppressed).
  *
  * Throws on any filesystem error.
  */
 export async function copyFile(sourcePath: string, destPath: string): Promise<void> {
   await fs.mkdir(dirname(destPath), { recursive: true });
-  const tmp = destPath + '.tunefetch.tmp';
+  const tmp = `${destPath}.tunefetch.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
   try {
     await fs.copyFile(sourcePath, tmp);
     await fs.rename(tmp, destPath);
-  } catch (err) {
-    await fs.unlink(tmp).catch(() => {}); // best-effort cleanup
-    throw err;
+  } finally {
+    await fs.unlink(tmp).catch(() => {}); // no-op on success (rename consumed it)
   }
 }
 

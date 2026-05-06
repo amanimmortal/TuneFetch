@@ -158,8 +158,28 @@ async function collectLidarrManagedPaths(rootSet: Set<string>): Promise<Set<stri
  *
  * Orphans are flagged for user review only — they are never auto-deleted.
  * The table is fully replaced on each scan so stale results don't accumulate.
+ *
+ * Concurrency: a single in-flight scan is reused for any concurrent caller.
+ * The scan triggers `verifyMirrorFiles` which performs file copies; running
+ * two passes in parallel races on the destination paths and produces
+ * spurious ENOENT-on-rename errors. Joining the in-flight promise also
+ * prevents the manual "Scan now" button from queueing duplicate work when
+ * the scheduler tick happens to overlap.
  */
-export async function runOrphanScan(): Promise<void> {
+let _scanInFlight: Promise<void> | null = null;
+
+export function runOrphanScan(): Promise<void> {
+  if (_scanInFlight) {
+    console.log('[scheduler] Orphan scan already running — joining existing run.');
+    return _scanInFlight;
+  }
+  _scanInFlight = _runOrphanScanCore().finally(() => {
+    _scanInFlight = null;
+  });
+  return _scanInFlight;
+}
+
+async function _runOrphanScanCore(): Promise<void> {
   const db = getDb();
 
   console.log('[scheduler] Starting orphan scan...');
