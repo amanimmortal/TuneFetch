@@ -10,6 +10,7 @@
   let savePending = false;
   let testPending = false;
   let testPlexPending = false;
+  let testMaPending = false;
 
   // Derive typed values from the opaque ActionData union.
   $: f = form as Record<string, unknown> | null;
@@ -18,18 +19,24 @@
   $: connectionMessage = (f?.connectionMessage as string  | undefined) ?? null;
   $: plexConnectionStatus = (f?.plexConnectionStatus as string | undefined) ?? null;
   $: plexConnectionMessage = (f?.plexConnectionMessage as string | undefined) ?? null;
+  $: maConnectionStatus = (f?.musicAssistantConnectionStatus as string | undefined) ?? null;
+  $: maConnectionMessage = (f?.musicAssistantConnectionMessage as string | undefined) ?? null;
   $: saved           = (f?.saved        as boolean | undefined) ?? false;
   $: isOk  = connectionStatus === 'ok';
   $: isErr = connectionStatus === 'error';
   $: plexIsOk  = plexConnectionStatus === 'ok';
   $: plexIsErr = plexConnectionStatus === 'error';
+  $: maIsOk  = maConnectionStatus === 'ok';
+  $: maIsErr = maConnectionStatus === 'error';
 
   const handleSubmit: SubmitFunction = ({ submitter }) => {
     const formaction =
       submitter instanceof HTMLButtonElement
         ? submitter.getAttribute('formaction') ?? ''
         : '';
-    if (formaction.includes('testPlexConnection')) {
+    if (formaction.includes('testMusicAssistantConnection')) {
+      testMaPending = true;
+    } else if (formaction.includes('testPlexConnection')) {
       testPlexPending = true;
     } else if (formaction.includes('testConnection')) {
       testPending = true;
@@ -43,6 +50,7 @@
         savePending = false;
         testPending = false;
         testPlexPending = false;
+        testMaPending = false;
       }
     };
   };
@@ -103,7 +111,7 @@
         type="submit"
         formaction="?/testConnection"
         class="btn-secondary"
-        disabled={savePending || testPending || testPlexPending}
+        disabled={savePending || testPending || testPlexPending || testMaPending}
       >
         {testPending ? 'Testing…' : 'Test Lidarr connection'}
       </button>
@@ -169,7 +177,7 @@
         type="submit"
         formaction="?/testPlexConnection"
         class="btn-secondary"
-        disabled={savePending || testPending || testPlexPending}
+        disabled={savePending || testPending || testPlexPending || testMaPending}
       >
         {testPlexPending ? 'Testing…' : 'Test Plex connection'}
       </button>
@@ -204,6 +212,72 @@
         Map Lidarr root folders to Plex users so playlists target the correct accounts.
       </p>
     </div>
+
+    <!-- ── Music Assistant ────────────────────────────────────────────── -->
+    <h2 class="text-lg font-medium text-slate-200 border-b border-slate-700 pb-2 mt-6">Music Assistant</h2>
+
+    <div>
+      <label for="music_assistant_url" class="mb-1 block text-sm font-medium text-slate-300">
+        Music Assistant URL
+      </label>
+      <input
+        id="music_assistant_url"
+        name="music_assistant_url"
+        type="url"
+        placeholder="http://192.168.1.10:8095"
+        value={data.settings.musicAssistantUrl}
+        class="input"
+        autocomplete="off"
+      />
+      <p class="mt-1 text-xs text-slate-500">
+        If configured, playlists will also be synced to Music Assistant after each Plex sync.
+      </p>
+    </div>
+
+    <div>
+      <label for="music_assistant_token" class="mb-1 block text-sm font-medium text-slate-300">
+        Bearer Token
+      </label>
+      <input
+        id="music_assistant_token"
+        name="music_assistant_token"
+        type="password"
+        placeholder={data.settings.musicAssistantTokenSet ? '(unchanged — leave blank to keep)' : ''}
+        value=""
+        class="input"
+        autocomplete="off"
+      />
+      <p class="mt-1 text-xs text-slate-500">
+        Generate a long-lived bearer token in Music Assistant's UI. Stored encrypted at rest.
+      </p>
+    </div>
+
+    <div>
+      <button
+        type="submit"
+        formaction="?/testMusicAssistantConnection"
+        class="btn-secondary"
+        disabled={savePending || testPending || testPlexPending || testMaPending}
+      >
+        {testMaPending ? 'Testing…' : 'Test Music Assistant connection'}
+      </button>
+    </div>
+
+    {#if maConnectionStatus}
+      <div
+        class="flex items-start gap-2 rounded-lg border px-3 py-2 text-sm
+          {maIsOk
+            ? 'border-green-700 bg-green-950 text-green-300'
+            : maIsErr
+            ? 'border-red-700 bg-red-950 text-red-300'
+            : 'border-slate-600 bg-slate-800 text-slate-400'}"
+      >
+        <span class="mt-px select-none text-base leading-none">
+          {maIsOk ? '✓' : maIsErr ? '✗' : '—'}
+        </span>
+        <span>{maConnectionMessage}</span>
+      </div>
+    {/if}
 
     <!-- ── General ────────────────────────────────────────────────────── -->
     <h2 class="text-lg font-medium text-slate-200 border-b border-slate-700 pb-2 mt-6">General</h2>
@@ -243,7 +317,7 @@
 
     <!-- Action buttons -->
     <div class="flex flex-wrap items-center gap-3 pt-2 border-t border-slate-700">
-      <button type="submit" class="btn-primary" disabled={savePending || testPending || testPlexPending}>
+      <button type="submit" class="btn-primary" disabled={savePending || testPending || testPlexPending || testMaPending}>
         {savePending ? 'Saving…' : 'Save all settings'}
       </button>
     </div>

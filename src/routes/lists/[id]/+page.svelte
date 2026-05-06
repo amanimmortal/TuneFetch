@@ -141,6 +141,16 @@
           `${r.notFound} not found`,
         ];
         if (r.errors > 0) parts.push(`${r.errors} error${r.errors !== 1 ? 's' : ''}`);
+
+        // MA result is null when MA isn't configured — no-op for those users.
+        const ma = r.maResult;
+        if (ma) {
+          parts.push(`MA: ${ma.added} added`);
+          if (ma.alreadyInMa > 0) parts.push(`${ma.alreadyInMa} already in MA`);
+          if (ma.notFound > 0) parts.push(`${ma.notFound} not found in MA`);
+          if (ma.errors > 0) parts.push(`${ma.errors} MA error${ma.errors !== 1 ? 's' : ''}`);
+        }
+
         plexSyncMessage = `Sync complete: ${parts.join(', ')}`;
         await invalidateAll();
       } else {

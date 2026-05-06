@@ -1,4 +1,5 @@
 import { getDb } from './db';
+import { decrypt, isEncrypted } from './crypto';
 
 /**
  * Known settings keys. Values are stored as strings in SQLite;
@@ -10,7 +11,9 @@ export const SETTING_KEYS = {
   ADMIN_CONTACT_EMAIL: 'admin_contact_email',
   ORPHAN_SCAN_TIME: 'orphan_scan_time', // HH:MM, 24-hour. Default 03:00.
   PLEX_URL: 'plex_url',
-  PLEX_ADMIN_TOKEN: 'plex_admin_token'
+  PLEX_ADMIN_TOKEN: 'plex_admin_token',
+  MUSIC_ASSISTANT_URL: 'music_assistant_url',
+  MUSIC_ASSISTANT_TOKEN: 'music_assistant_token'
 } as const;
 
 export type SettingKey = (typeof SETTING_KEYS)[keyof typeof SETTING_KEYS];
@@ -73,4 +76,37 @@ export function getPlexConfig(): { baseUrl: string; adminToken: string } {
     );
   }
   return { baseUrl: baseUrl.replace(/\/+$/, ''), adminToken };
+}
+
+/**
+ * Return the Music Assistant base URL and bearer token.
+ *
+ * Throws a plain Error if either value is missing — auth is mandatory in MA
+ * as of schema v28, so a configured URL without a token is a misconfiguration.
+ *
+ * The token is stored encrypted at rest (matching the Plex token pattern);
+ * decrypt transparently if the prefix is present, but accept plaintext as a
+ * fallback so manually-seeded values still work.
+ */
+export function getMusicAssistantConfig(): { baseUrl: string; token: string } {
+  const baseUrl = getSetting(SETTING_KEYS.MUSIC_ASSISTANT_URL);
+  const stored = getSetting(SETTING_KEYS.MUSIC_ASSISTANT_TOKEN);
+  if (!baseUrl || !stored) {
+    throw new Error(
+      'Music Assistant URL and bearer token must be configured in Settings before using this feature.'
+    );
+  }
+  const token = isEncrypted(stored) ? decrypt(stored) : stored;
+  return { baseUrl: baseUrl.replace(/\/+$/, ''), token };
+}
+
+/**
+ * True when MA is configured. Used by the sync engine to skip silently when
+ * the user hasn't enabled the integration, so MA stays opt-in.
+ */
+export function isMusicAssistantConfigured(): boolean {
+  return Boolean(
+    getSetting(SETTING_KEYS.MUSIC_ASSISTANT_URL) &&
+      getSetting(SETTING_KEYS.MUSIC_ASSISTANT_TOKEN)
+  );
 }

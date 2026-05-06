@@ -24,6 +24,7 @@ import {
 	refreshLibrarySection
 } from './plex';
 import { decrypt, isEncrypted } from './crypto';
+import type { MaSyncResult } from './ma-sync';
 
 /** Decrypt a Plex token that may be stored encrypted or as legacy plaintext. */
 function resolveToken(stored: string): string {
@@ -72,18 +73,47 @@ export interface SyncResult {
 	errors: number;
 	/** Items that couldn't be found in Plex (artist + title). */
 	unmatched: Array<{ listItemId: number; artistName: string; title: string }>;
+	/**
+	 * Music Assistant sync result. `null` when MA isn't configured (the
+	 * integration stays opt-in) or when MA sync threw a hard error that we
+	 * swallowed to keep MA failures non-fatal to Plex.
+	 */
+	maResult: MaSyncResult | null;
 }
 
 // ── Core sync function ────────────────────────────────────────────────────────
 
 /**
- * Sync a TuneFetch list to its linked Plex playlist.
+ * Sync a TuneFetch list to its linked Plex playlist, then push the same
+ * playlist into Music Assistant if configured.
+ *
+ * The MA push is wrapped here (not at the API route) so the retry path in
+ * _retryWithBackoff also picks it up — every code path that mutates a Plex
+ * playlist also keeps MA in sync via one wiring point.
  *
  * @param plexPlaylistDbId - The id from the plex_playlists table (not the Plex ratingKey).
  */
 export async function syncListToPlexPlaylist(
 	plexPlaylistDbId: number
 ): Promise<SyncResult> {
+	const plexResult = await runPlexSync(plexPlaylistDbId);
+
+	let maResult: MaSyncResult | null = null;
+	try {
+		const { syncPlaylistToMusicAssistant } = await import('./ma-sync');
+		const ma = await syncPlaylistToMusicAssistant(plexPlaylistDbId);
+		// Caller treats `null` as "feature off" — surface skipped state that way.
+		maResult = ma.skipped ? null : ma;
+	} catch (err) {
+		console.error('[plex-sync] MA sync error (non-fatal):', err);
+	}
+
+	return { ...plexResult, maResult };
+}
+
+async function runPlexSync(
+	plexPlaylistDbId: number
+): Promise<Omit<SyncResult, 'maResult'>> {
 	const db = getDb();
 
 	const row = db
@@ -220,7 +250,7 @@ export async function syncListToPlexPlaylist(
 		).map((r) => r.list_item_id)
 	);
 
-	const result: SyncResult = {
+	const result: Omit<SyncResult, 'maResult'> = {
 		added: 0,
 		alreadySynced: alreadySynced.size,
 		notFound: 0,
