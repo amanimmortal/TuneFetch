@@ -95,6 +95,15 @@ export async function testConnection(): Promise<boolean> {
  * Search MA library for a track. Returns the MA `uri` (e.g. "library://track/456"),
  * or null if no acceptable match is found.
  *
+ * Search strategy (title-only primary search):
+ * MA's search tokenizer chokes on certain characters (notably `/` in artist
+ * names like "AC/DC"). Combining `artistName + trackTitle` into a single query
+ * is fundamentally fragile. Instead we:
+ *   1. Search by track title only — avoids tokenizer issues entirely.
+ *   2. If title-only returns 0 results, retry with a sanitized (alphanumeric +
+ *      spaces) artist name prepended — catches rare tracks with generic titles.
+ *   3. Filter results client-side for artist and title match.
+ *
  * Match strategy:
  * - Title: case-insensitive equality after normalization (lowercase, strip
  *   parentheticals, common punctuation, and curly quotes). Also accepts a
@@ -105,11 +114,6 @@ export async function testConnection(): Promise<boolean> {
  *   When MA returns an `ItemMapping` (no `artists[]` field), we trust the
  *   search result since the query already included the artist name.
  *
- * `library_only: true` was removed because it returned zero results in the
- * field — provider-sourced tracks (Plex-mirrored) weren't being included
- * even when reachable through the MA UI. We let the search return the broad
- * set and filter client-side.
- *
  * On a miss, logs the top candidates MA returned so the user can diagnose
  * whether the search is too narrow or the matcher is too strict.
  */
@@ -117,13 +121,30 @@ export async function searchTrack(
 	artistName: string,
 	trackTitle: string
 ): Promise<string | null> {
-	const results = await command<MaSearchResults>('music/search', {
-		search_query: `${artistName} ${trackTitle}`,
+	// Primary search: title-only to prevent MA tokenizer issues with artist names
+	// containing special characters (e.g. "AC/DC", "GZA/Genius")
+	let results = await command<MaSearchResults>('music/search', {
+		search_query: trackTitle,
 		media_types: ['track'],
 		limit: 25
 	});
 
-	const tracks = results.tracks ?? [];
+	let tracks = results.tracks ?? [];
+
+	// Fallback: if title-only returned nothing, retry with sanitized artist + title.
+	// Sanitization strips all non-alphanumeric chars so "AC/DC" becomes "AC DC".
+	if (tracks.length === 0) {
+		const sanitizedArtist = artistName.replace(/[^a-zA-Z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+		if (sanitizedArtist) {
+			results = await command<MaSearchResults>('music/search', {
+				search_query: `${sanitizedArtist} ${trackTitle}`,
+				media_types: ['track'],
+				limit: 25
+			});
+			tracks = results.tracks ?? [];
+		}
+	}
+
 	if (tracks.length === 0) {
 		console.log(`[ma-sync] MA search returned 0 tracks for "${artistName} - ${trackTitle}"`);
 		return null;
