@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx vitest *)",
+      "Bash(gh pr create --title 'fix\\(mirror\\): orphan dismiss feature + mirror_broken items skipped by webhook' --body ' *)"
+    ]
+  }
+}
