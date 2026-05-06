@@ -121,6 +121,11 @@ async function checkWritable(dir: string): Promise<void> {
  * second writer's rename races against the first writer's rename and produces
  * spurious ENOENT errors when the temp it expects has already been consumed.
  *
+ * The `finally` block unlinks the temp on every exit path so a failure mid-
+ * copy never leaves orphan `.tunefetch.<pid>.<hex>.tmp` files alongside user
+ * media. On success the rename has already consumed the temp, so the unlink
+ * is a no-op (suppressed).
+ *
  * Throws on any filesystem error.
  */
 export async function copyFile(sourcePath: string, destPath: string): Promise<void> {
@@ -129,9 +134,8 @@ export async function copyFile(sourcePath: string, destPath: string): Promise<vo
   try {
     await fs.copyFile(sourcePath, tmp);
     await fs.rename(tmp, destPath);
-  } catch (err) {
-    await fs.unlink(tmp).catch(() => {}); // best-effort cleanup
-    throw err;
+  } finally {
+    await fs.unlink(tmp).catch(() => {}); // no-op on success (rename consumed it)
   }
 }
 

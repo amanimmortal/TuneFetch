@@ -69,8 +69,10 @@ interface MirrorCandidate {
  * Match order:
  *   1. Single-track upgrade (1 deleted, 1 new) — trivially the same file.
  *   2. Exact relativePath match.
- *   3. Same basename without extension (handles format upgrades like
- *      `01-T.N.T.mp3` → `01-T.N.T.flac`).
+ *   3. Same filename basename without extension. Compares the basename only
+ *      (not the full relative path) so a folder rename on upgrade — e.g.
+ *      `AC_DC/T.N.T. (1975)/01-T.N.T.mp3` → `AC_DC/TNT/01-T.N.T.flac` —
+ *      still pairs correctly.
  */
 function matchUpgradeReplacement(
   oldFile: WebhookTrackFile,
@@ -85,9 +87,9 @@ function matchUpgradeReplacement(
     const exact = trackFiles.find((f) => f.relativePath === oldFile.relativePath);
     if (exact) return exact;
 
-    const oldStem = stripExtension(oldFile.relativePath);
+    const oldStem = basenameWithoutExtension(oldFile.relativePath);
     const stemMatch = trackFiles.find(
-      (f) => f.relativePath && stripExtension(f.relativePath) === oldStem
+      (f) => f.relativePath && basenameWithoutExtension(f.relativePath) === oldStem
     );
     if (stemMatch) return stemMatch;
   }
@@ -95,8 +97,21 @@ function matchUpgradeReplacement(
   return undefined;
 }
 
-function stripExtension(p: string): string {
-  return p.replace(/\.[^./\\]+$/, '');
+/**
+ * Return the basename of a path with its final extension removed.
+ *
+ * Implemented manually rather than via `path.parse` so it's robust to either
+ * separator style (Lidarr's relativePath shape isn't guaranteed across hosts)
+ * and to multi-dot filenames like `01.Track.Name.flac` (where path.parse's
+ * `.name` would still give the right answer, but we want one consistent
+ * implementation either way).
+ */
+function basenameWithoutExtension(p: string): string {
+  const normalized = p.replace(/\\/g, '/');
+  const slash = normalized.lastIndexOf('/');
+  const base = slash >= 0 ? normalized.slice(slash + 1) : normalized;
+  const dot = base.lastIndexOf('.');
+  return dot > 0 ? base.slice(0, dot) : base;
 }
 
 // ── Handler ───────────────────────────────────────────────────────────────────
