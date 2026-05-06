@@ -95,8 +95,23 @@ export async function testConnection(): Promise<boolean> {
  * Search MA library for a track. Returns the MA `uri` (e.g. "library://track/456"),
  * or null if no acceptable match is found.
  *
- * Match strategy mirrors plex.ts: exact title match (case-insensitive), and the
- * artist name must appear as a substring of one of the track's artists.
+ * Match strategy:
+ * - Title: case-insensitive equality after normalization (lowercase, strip
+ *   parentheticals, common punctuation, and curly quotes). Also accepts a
+ *   word-bounded suffix like "Thunder - Single Version" matching "Thunder",
+ *   without letting "Thunder" match "Thunderstruck".
+ * - Artist: alphanumeric-only comparison so "AC/DC" matches "AC DC" or "ACDC".
+ *   Bidirectional substring so "Imagine Dragons" matches "imagine dragons feat. ...".
+ *   When MA returns an `ItemMapping` (no `artists[]` field), we trust the
+ *   search result since the query already included the artist name.
+ *
+ * `library_only: true` was removed because it returned zero results in the
+ * field — provider-sourced tracks (Plex-mirrored) weren't being included
+ * even when reachable through the MA UI. We let the search return the broad
+ * set and filter client-side.
+ *
+ * On a miss, logs the top candidates MA returned so the user can diagnose
+ * whether the search is too narrow or the matcher is too strict.
  */
 export async function searchTrack(
 	artistName: string,
@@ -105,21 +120,81 @@ export async function searchTrack(
 	const results = await command<MaSearchResults>('music/search', {
 		search_query: `${artistName} ${trackTitle}`,
 		media_types: ['track'],
-		limit: 10,
-		library_only: true
+		limit: 25
 	});
 
 	const tracks = results.tracks ?? [];
-	const titleLower = trackTitle.toLowerCase();
-	const artistLower = artistName.toLowerCase();
+	if (tracks.length === 0) {
+		console.log(`[ma-sync] MA search returned 0 tracks for "${artistName} - ${trackTitle}"`);
+		return null;
+	}
+
+	const wantTitle = normalizeForMatch(trackTitle);
 
 	for (const t of tracks) {
-		if (t.name.toLowerCase() !== titleLower) continue;
-		const artists = t.artists ?? [];
-		const artistMatch = artists.some((a) => a.name.toLowerCase().includes(artistLower));
-		if (artistMatch && t.uri) return t.uri;
+		if (!t.uri || !t.name) continue;
+		if (!titleMatches(t.name, wantTitle)) continue;
+		if (!artistMatches(t.artists, artistName)) continue;
+		return t.uri;
 	}
+
+	const candidates = tracks
+		.slice(0, 5)
+		.map((t) => {
+			const a = t.artists?.[0]?.name;
+			return a ? `"${t.name}" by ${a}` : `"${t.name}"`;
+		})
+		.join(', ');
+	console.log(
+		`[ma-sync] No acceptable MA match for "${artistName} - ${trackTitle}" ` +
+			`among ${tracks.length} result(s). Top: ${candidates}`
+	);
 	return null;
+}
+
+/**
+ * Normalize a string for title matching: lowercase, strip parenthetical
+ * suffixes (versions, "(feat. X)"), common punctuation, and curly quotes.
+ * Preserves word boundaries.
+ */
+function normalizeForMatch(s: string): string {
+	return s
+		.toLowerCase()
+		.replace(/\([^)]*\)/g, '')
+		.replace(/[’‘'`"]/g, '')
+		.replace(/[.,!?/]/g, '')
+		.replace(/\s+/g, ' ')
+		.trim();
+}
+
+/** Strip everything except a-z and 0-9 — used for artist names where
+ * "AC/DC", "AC DC", and "ACDC" should all be considered equivalent. */
+function alphanumOnly(s: string): string {
+	return s.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function titleMatches(actual: string, wantNormalized: string): boolean {
+	const a = normalizeForMatch(actual);
+	if (a === wantNormalized) return true;
+	// Allow a suffix variation like "Thunder - Single Version" to match
+	// "Thunder", but require a word boundary so "Thunderstruck" doesn't
+	// match "Thunder".
+	return a.startsWith(wantNormalized + ' ') || a.startsWith(wantNormalized + '-');
+}
+
+function artistMatches(
+	artists: Array<{ name: string }> | undefined,
+	wantArtist: string
+): boolean {
+	// MA can return an `ItemMapping` (no artists[]) instead of a full Track.
+	// In that case trust the search since the query already included the
+	// artist name.
+	if (!artists || artists.length === 0) return true;
+	const wantA = alphanumOnly(wantArtist);
+	return artists.some((a) => {
+		const an = alphanumOnly(a.name);
+		return an === wantA || an.includes(wantA) || wantA.includes(an);
+	});
 }
 
 /** Find a playlist by exact name. Returns null if none match. */
