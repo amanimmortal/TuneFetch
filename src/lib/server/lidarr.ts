@@ -248,6 +248,19 @@ export function getQualityProfiles(fetchFn?: FetchFn): Promise<QualityProfile[]>
 	return request<QualityProfile[]>('GET', '/api/v1/qualityprofile', undefined, fetchFn);
 }
 
+/**
+ * Get the single primary root folder from Lidarr.
+ * In the single-root architecture, Lidarr manages one root folder (the primary)
+ * while lists manage their own mirror destination paths.
+ */
+export async function getLidarrPrimaryRoot(fetchFn?: FetchFn): Promise<string> {
+	const folders = await rootFolders(fetchFn);
+	if (folders.length === 0) {
+		throw new LidarrError('No root folders configured in Lidarr.');
+	}
+	return folders[0].path;
+}
+
 /** Return all configured metadata profiles. */
 export function getMetadataProfiles(fetchFn?: FetchFn): Promise<MetadataProfile[]> {
 	return request<MetadataProfile[]>('GET', '/api/v1/metadataprofile', undefined, fetchFn);
@@ -356,7 +369,7 @@ export function getTrackFiles(
  * @param body  Command-specific payload, e.g. `{ artistId: 42 }` or `{ trackIds: [1, 2] }`
  */
 export function runCommand(
-	name: 'ArtistSearch' | 'AlbumSearch' | 'TrackSearch',
+	name: 'ArtistSearch' | 'AlbumSearch' | 'TrackSearch' | 'RescanArtist',
 	body: Record<string, unknown>,
 	fetchFn?: FetchFn
 ): Promise<LidarrCommand> {

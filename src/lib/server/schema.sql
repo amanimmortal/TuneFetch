@@ -56,19 +56,6 @@ CREATE INDEX IF NOT EXISTS idx_list_items_list ON list_items(list_id);
 CREATE INDEX IF NOT EXISTS idx_list_items_mbid ON list_items(mbid);
 CREATE INDEX IF NOT EXISTS idx_list_items_artist_mbid ON list_items(artist_mbid);
 
--- Tracks which list "owns" each artist in Lidarr.
--- owner_list_id uses ON DELETE SET NULL so that deleting a list does not
--- violate the FK constraint — the migration in db.ts then reassigns or
--- cleans up orphaned rows in a single transaction.
-CREATE TABLE IF NOT EXISTS artist_ownership (
-  id               INTEGER PRIMARY KEY,
-  artist_mbid      TEXT NOT NULL UNIQUE,
-  lidarr_artist_id INTEGER NOT NULL,
-  owner_list_id    INTEGER REFERENCES lists(id) ON DELETE SET NULL,
-  root_folder_path TEXT NOT NULL,
-  created_at       DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-
 -- File copies created by TuneFetch for secondary-list items (OQ-7 resolved).
 --
 -- lidarr_track_file_id / lidarr_track_id are the stable handles we use to

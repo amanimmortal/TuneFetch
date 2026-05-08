@@ -1,7 +1,7 @@
 import { fail } from '@sveltejs/kit';
 import type { Actions, PageServerLoad } from './$types';
 import { getDb } from '$lib/server/db';
-import { enqueueRefreshStaleAll } from '$lib/server/mirror';
+import { enqueueRefreshStaleAll, pruneOutOfScopeMirrors } from '$lib/server/mirror';
 import { runOrphanScan } from '$lib/server/scheduler';
 
 // ── Row types ─────────────────────────────────────────────────────────────────
@@ -137,6 +137,21 @@ export const actions: Actions = {
   refreshStale: async () => {
     const queued = enqueueRefreshStaleAll();
     return { queued };
+  },
+
+  /**
+   * Run the out-of-scope pruning immediately (on-demand).
+   * Finds mirror rows whose files no longer belong in the target list (e.g., legacy full-artist syncs)
+   * and deletes them from disk and the database.
+   */
+  prune: async () => {
+    try {
+      const pruned = await pruneOutOfScopeMirrors();
+      return { pruned };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return fail(500, { pruneError: msg });
+    }
   },
 
   /**

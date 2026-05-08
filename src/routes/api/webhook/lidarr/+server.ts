@@ -192,48 +192,69 @@ export const POST: RequestHandler = async ({ request }) => {
   // ── New download path ──────────────────────────────────────────────────────
   // A new file has been acquired for an artist. Copy it into every secondary
   // list that has items for this artist (items whose list's root folder differs
-  // from the artist's owning root folder).
+  // from the primary root folder).
 
   if (trackFiles.length === 0) {
     return json({ ok: true, ignored: true, reason: 'no track files in payload' });
   }
 
-  // Get the owner's root folder for this artist.
-  const ownerRow = db
-    .prepare('SELECT root_folder_path FROM artist_ownership WHERE lidarr_artist_id = ?')
-    .get(lidarrArtistId) as { root_folder_path: string } | undefined;
-
-  if (!ownerRow) {
-    // Artist not tracked by TuneFetch -- nothing to mirror.
-    return json({ ok: true, ignored: true, reason: 'artist not in artist_ownership' });
+  const { getLidarrPrimaryRoot, getTracks } = await import('$lib/server/lidarr');
+  let primaryRoot: string;
+  try {
+    primaryRoot = await getLidarrPrimaryRoot();
+  } catch (err) {
+    console.error('[webhook] failed to get primary root:', err);
+    return json({ error: 'failed to get primary root' }, { status: 500 });
   }
 
-  const ownerRoot = ownerRow.root_folder_path;
-
-  // Find list_items belonging to lists with a DIFFERENT root folder than the owner.
+  // Find list_items belonging to lists with a DIFFERENT root folder than the primary.
   // These are the items that need file copies for the new download.
   const mirrorCandidates = db
     .prepare(
-      `SELECT li.id AS list_item_id, l.root_folder_path AS target_root
+      `SELECT li.id AS list_item_id, l.root_folder_path AS target_root,
+              li.type, li.lidarr_album_id, li.lidarr_track_id
          FROM list_items li
          JOIN lists l ON l.id = li.list_id
         WHERE li.lidarr_artist_id = ?
           AND l.root_folder_path != ?
           AND li.sync_status IN ('mirror_pending', 'mirror_active', 'mirror_broken', 'synced')`
     )
-    .all(lidarrArtistId, ownerRoot) as MirrorCandidate[];
+    .all(lidarrArtistId, primaryRoot) as Array<{
+      list_item_id: number;
+      target_root: string;
+      type: 'artist' | 'album' | 'track';
+      lidarr_album_id: number | null;
+      lidarr_track_id: number | null;
+    }>;
 
   if (mirrorCandidates.length === 0) {
     return json({ ok: true, mirrors: 0 });
   }
 
-  // Copy each new track file to each secondary list's root folder.
+  const { filterTrackFilesByScope } = await import('$lib/server/mirror');
+  let artistTracks: any[] = [];
+  try {
+    artistTracks = await getTracks(lidarrArtistId);
+  } catch (err) {
+    console.warn(`[webhook] failed to fetch tracks for artist ${lidarrArtistId}:`, err);
+  }
+
+  // Copy each new track file to each secondary list's root folder, filtered by scope.
   const tasks: Promise<void>[] = [];
 
   for (const candidate of mirrorCandidates) {
-    for (const trackFile of trackFiles) {
+    const scope: MirrorScope = {
+      type: candidate.type,
+      lidarrAlbumId: candidate.lidarr_album_id ?? undefined,
+      lidarrTrackId: candidate.lidarr_track_id ?? undefined
+    };
+
+    // Filter the payload files by the candidate's scope
+    const scopedFiles = filterTrackFilesByScope(trackFiles as any[], scope, artistTracks);
+
+    for (const trackFile of scopedFiles) {
       tasks.push(
-        mirrorTrackFile(trackFile.path, candidate.list_item_id, ownerRoot, candidate.target_root, {
+        mirrorTrackFile(trackFile.path, candidate.list_item_id, primaryRoot, candidate.target_root, {
           trackFileId: trackFile.id
         })
           .then(() => {
@@ -284,4 +305,5 @@ export const POST: RequestHandler = async ({ request }) => {
     candidates: mirrorCandidates.length
   });
 };
+
 

@@ -1,6 +1,7 @@
-﻿<script lang="ts">
+<script lang="ts">
   import { enhance } from "$app/forms";
   import type { ActionData, PageData } from "./$types";
+  import FolderPicker from "$lib/components/FolderPicker.svelte";
 
   export let data: PageData;
   export let form: ActionData;
@@ -70,12 +71,7 @@
           <label for="new_root_folder" class="mb-1 block text-sm font-medium text-slate-300">
             Root folder
           </label>
-          <select id="new_root_folder" name="root_folder_path" class="input" required>
-            <option value="" disabled selected>Select a root folder…</option>
-            {#each data.folders as folder}
-              <option value={folder.path}>{folder.path}</option>
-            {/each}
-          </select>
+          <FolderPicker name="root_folder_path" id="new_root_folder" required={true} />
         </div>
 
         <div>

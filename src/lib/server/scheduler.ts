@@ -19,7 +19,7 @@ import {
   markMissingMirrorsStale,
   verifyMirrorFiles,
   backfillLegacyHandles,
-  repairCorruptedMirrorPaths
+  pruneOutOfScopeMirrors
 } from './mirror';
 
 // ── Orphan detection ──────────────────────────────────────────────────────────
@@ -183,6 +183,15 @@ async function _runOrphanScanCore(): Promise<void> {
   const db = getDb();
 
   console.log('[scheduler] Starting orphan scan...');
+
+  try {
+    const pruned = await pruneOutOfScopeMirrors();
+    if (pruned > 0) {
+      console.log(`[scheduler] Pruned ${pruned} out-of-scope mirror file(s).`);
+    }
+  } catch (err) {
+    console.error('[scheduler] Failed to prune out-of-scope mirrors:', err);
+  }
 
   // Find root folders that TuneFetch actively uses as mirror destinations.
   // Join through list_items -> lists to get the root_folder_path.
@@ -399,18 +408,7 @@ export function startScheduler(): void {
   _started = true;
   scheduleNextRun();
   startSessionCleanup();
-  // Synchronous DB-only repair for any corrupted mirror_path values left
-  // behind by an earlier buggy heal. Cheap, idempotent, and fixes 500s on
-  // the first refreshStale request after startup, so do it before the
-  // first request can trigger a copy.
-  try {
-    const repaired = repairCorruptedMirrorPaths();
-    if (repaired > 0) {
-      console.log(`[startup] Repaired ${repaired} mirror_files row(s) with corrupted mirror_path.`);
-    }
-  } catch (err) {
-    console.error('[startup] Mirror path repair failed:', err);
-  }
+
   // Non-blocking — don't await; log warnings asynchronously.
   checkLidarrOnStartup().catch((err) =>
     console.error('[startup] Lidarr check failed unexpectedly:', err)

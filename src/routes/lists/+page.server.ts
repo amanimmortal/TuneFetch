@@ -128,113 +128,35 @@ export const actions: Actions = {
 	/**
 	 * Delete a list.
 	 *
-	 * First call (confirmed = false / missing):
-	 *   - Checks artist_ownership for this list.
-	 *   - If any owned artists exist, returns a warning with transferable and blocked groups.
-	 *   - If no owned artists, deletes immediately.
-	 *
-	 * Second call (confirmed = true):
-	 *   - Performs ownership transfers for all transferable artists (Lidarr + DB).
-	 *   - Deletes the list (cascade removes list_items + mirror_files).
-	 *   - Still blocked if any artists have no transfer target.
+	 * - Unlinks all mirror files from disk to prevent orphaning.
+	 * - Deletes the list (cascade removes list_items + mirror_files).
 	 */
 	delete: async ({ request }) => {
 		const data = await request.formData();
 		const id = Number(data.get("id"));
-		const confirmed = data.get("confirmed") === "true";
 
 		const db = getDb();
+		const fs = await import('fs/promises');
 
-		// Find all artists this list owns in Lidarr
-		const ownedArtists = db
+		// Find all mirrored files for this list
+		const mirrorFiles = db
 			.prepare(
-				`SELECT ao.artist_mbid, ao.lidarr_artist_id, ao.root_folder_path,
-              COALESCE(
-                (SELECT li2.artist_name FROM list_items li2
-                 WHERE li2.lidarr_artist_id = ao.lidarr_artist_id
-                   AND li2.list_id = ao.owner_list_id LIMIT 1),
-                ao.artist_mbid
-              ) as display_name
-         FROM artist_ownership ao
-         WHERE ao.owner_list_id = ?`
+				`SELECT mf.mirror_path
+				 FROM mirror_files mf
+				 JOIN list_items li ON li.id = mf.list_item_id
+				 WHERE li.list_id = ? AND mf.mirror_path IS NOT NULL`
 			)
-			.all(id) as OwnedArtistRow[];
+			.all(id) as Array<{ mirror_path: string }>;
 
-		if (ownedArtists.length > 0) {
-			// Categorise each owned artist as transferable or blocked
-			const transferable: Array<
-				OwnedArtistRow & {
-					newOwnerListId: number;
-					newOwnerName: string;
-					newOwnerRootFolder: string;
+		// Delete files from disk to prevent orphans
+		for (const file of mirrorFiles) {
+			try {
+				await fs.unlink(file.mirror_path);
+			} catch (err) {
+				// Ignore ENOENT (file already gone), log others
+				if (err instanceof Error && 'code' in err && (err as any).code !== 'ENOENT') {
+					console.error(`[delete] Failed to unlink ${file.mirror_path}:`, err);
 				}
-			> = [];
-			const blocked: OwnedArtistRow[] = [];
-
-			for (const artist of ownedArtists) {
-				const alt = db
-					.prepare(
-						`SELECT li.list_id, l.name as list_name, l.root_folder_path
-               FROM list_items li
-               JOIN lists l ON l.id = li.list_id
-               WHERE li.lidarr_artist_id = ? AND li.list_id != ?
-               LIMIT 1`
-					)
-					.get(artist.lidarr_artist_id, id) as AltListRow | undefined;
-
-				if (alt) {
-					transferable.push({
-						...artist,
-						newOwnerListId: alt.list_id,
-						newOwnerName: alt.list_name,
-						newOwnerRootFolder: alt.root_folder_path
-					});
-				} else {
-					blocked.push(artist);
-				}
-			}
-
-			// Surface warning if: not yet confirmed, or there are blocked artists
-			if (!confirmed || blocked.length > 0) {
-				return {
-					deleteWarning: true as const,
-					deleteId: id,
-					transferable,
-					blocked
-				};
-			}
-
-			// confirmed && no blocked -- perform ownership transfers.
-			// Lidarr update must succeed before we touch the DB; otherwise
-			// Lidarr still owns the artist under the old root folder but
-			// TuneFetch would show it as deleted, creating orphaned mirrors.
-			const lidarrArtists = await listArtists().catch((err) => {
-				console.error('[delete] Could not fetch Lidarr artists for ownership transfer:', err);
-				return null;
-			});
-
-			for (const artist of transferable) {
-				const lidarrArtist = lidarrArtists?.find((a) => a.id === artist.lidarr_artist_id);
-				if (lidarrArtist) {
-					try {
-						await updateArtist({ ...lidarrArtist, rootFolderPath: artist.newOwnerRootFolder });
-					} catch (err) {
-						console.error(
-							`[delete] Lidarr ownership transfer failed for artist ${artist.artist_mbid}:`, err
-						);
-						return fail(502, {
-							deleteError: `Lidarr ownership transfer failed for artist "${artist.display_name}". ` +
-								`The list was not deleted. Check that Lidarr is reachable and try again.`
-						});
-					}
-				}
-
-				// Update ownership record in DB
-				db.prepare(
-					`UPDATE artist_ownership
-           SET owner_list_id = ?, root_folder_path = ?
-           WHERE artist_mbid = ?`
-				).run(artist.newOwnerListId, artist.newOwnerRootFolder, artist.artist_mbid);
 			}
 		}
 
