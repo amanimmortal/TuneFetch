@@ -9,9 +9,11 @@
   $: refreshError  = (f?.refreshError  as string | undefined) ?? null;
   $: scanError     = (f?.scanError     as string | undefined) ?? null;
   $: dismissError  = (f?.dismissError  as string | undefined) ?? null;
+  $: pruneError    = (f?.pruneError    as string | undefined) ?? null;
   $: refreshed     = (f?.refreshed     as number | undefined) ?? null;
   $: scanned       = (f?.scanned       as boolean | undefined) ?? false;
   $: dismissed     = (f?.dismissed     as number | undefined) ?? null;
+  $: pruned        = (f?.pruned        as number | undefined) ?? null;
 
   // Truncate long paths for display — show tail end, most readable part
   function shortPath(p: string, maxLen = 60): string {
@@ -33,6 +35,15 @@
       </p>
     </div>
     <div class="flex gap-2">
+      <form method="POST" action="?/prune" use:enhance>
+        <button
+          type="submit"
+          class="btn-secondary"
+          title="Delete mirror files that are no longer in scope for their target list"
+        >
+          Prune Out-of-Scope
+        </button>
+      </form>
       <form method="POST" action="?/refreshStale" use:enhance>
         <button
           type="submit"
@@ -73,6 +84,14 @@
   {#if dismissed !== null}
     <div class="rounded-md border border-green-800 bg-green-900/40 p-3 text-sm text-green-300">
       {dismissed} orphan{dismissed === 1 ? '' : 's'} dismissed — {dismissed === 1 ? 'it' : 'they'} will not reappear in future scans.
+    </div>
+  {/if}
+  {#if pruneError}
+    <div class="rounded-md border border-red-800 bg-red-900/40 p-3 text-sm text-red-300">{pruneError}</div>
+  {/if}
+  {#if pruned !== null}
+    <div class="rounded-md border border-green-800 bg-green-900/40 p-3 text-sm text-green-300">
+      Successfully pruned {pruned} out-of-scope mirror file(s).
     </div>
   {/if}
 

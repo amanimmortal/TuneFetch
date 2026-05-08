@@ -21,11 +21,81 @@ import {
   getTracks,
   LidarrError,
   type LidarrTrack,
-  type LidarrTrackFile
+  type LidarrTrackFile,
+  getLidarrPrimaryRoot
 } from './lidarr';
 import { triggerPlexRefreshAndSync } from './plex-sync';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Mirror scope — determines which files should be mirrored for a list_item.
+ *
+ * In the single-root architecture, Lidarr manages one root folder and
+ * secondary lists mirror only the files matching their scope:
+ *   - `artist`: all files for the artist (full mirror)
+ *   - `album`:  only files belonging to the specific album
+ *   - `track`:  only the single file for the specific track
+ */
+export interface MirrorScope {
+  type: 'artist' | 'album' | 'track';
+  lidarrAlbumId?: number;
+  lidarrTrackId?: number;
+}
+
+/**
+ * Filter track files to only those within the given scope.
+ *
+ * - `artist` → all files (no filter)
+ * - `album`  → files with matching albumId
+ * - `track`  → the single file corresponding to the track's trackFileId
+ *
+ * For track scoping, `allTracks` must be provided so we can resolve
+ * lidarrTrackId → trackFileId. Falls back to album scope if the track
+ * can't be resolved, and to full artist if the album can't be resolved.
+ */
+export function filterTrackFilesByScope(
+  allTrackFiles: LidarrTrackFile[],
+  scope: MirrorScope,
+  allTracks?: LidarrTrack[]
+): LidarrTrackFile[] {
+  if (scope.type === 'artist') {
+    return allTrackFiles;
+  }
+
+  if (scope.type === 'track' && scope.lidarrTrackId != null && allTracks) {
+    const track = allTracks.find((t) => t.id === scope.lidarrTrackId);
+    const trackFileId = track?.trackFileId;
+    if (trackFileId && trackFileId > 0) {
+      const file = allTrackFiles.filter((f) => f.id === trackFileId);
+      if (file.length > 0) return file;
+    }
+    // Track's file not found — fall back to album scope if we have albumId.
+    // This handles the case where the track is known but its file hasn't
+    // been downloaded yet, or the trackFileId mapping is stale.
+    if (scope.lidarrAlbumId != null) {
+      console.log(
+        `[mirror] filterTrackFilesByScope: track ${scope.lidarrTrackId} file not found, ` +
+        `falling back to album ${scope.lidarrAlbumId} scope`
+      );
+      return allTrackFiles.filter((f) => f.albumId === scope.lidarrAlbumId);
+    }
+    // No album fallback available — return empty (caller handles mirror_pending)
+    return [];
+  }
+
+  if ((scope.type === 'album' || scope.type === 'track') && scope.lidarrAlbumId != null) {
+    return allTrackFiles.filter((f) => f.albumId === scope.lidarrAlbumId);
+  }
+
+  // Scope IDs missing — can't filter, return all as safest fallback.
+  // This happens for legacy items where lidarr_album_id/lidarr_track_id wasn't set.
+  console.warn(
+    `[mirror] filterTrackFilesByScope: scope type=${scope.type} but no scope IDs set, ` +
+    `returning all ${allTrackFiles.length} files`
+  );
+  return allTrackFiles;
+}
 
 /**
  * Stable Lidarr handles attached to a mirrored file.
@@ -242,9 +312,7 @@ async function resolveCurrentSourcePath(
       tracks = [];
     }
     const track = tracks.find((t) => t.id === row.lidarr_track_id);
-    const newTrackFileId = track
-      ? (track as unknown as { trackFileId?: number }).trackFileId
-      : undefined;
+    const newTrackFileId = track?.trackFileId;
     if (newTrackFileId && newTrackFileId > 0) {
       const file = trackFiles.find((f) => f.id === newTrackFileId);
       if (file) {
@@ -553,9 +621,10 @@ export function startBackfill(
   lidarrArtistId: number,
   listItemId: number,
   ownerRoot: string,
-  targetRoot: string
+  targetRoot: string,
+  scope: MirrorScope
 ): Promise<void> {
-  const job = _runBackfill(lidarrArtistId, listItemId, ownerRoot, targetRoot);
+  const job = _runBackfill(lidarrArtistId, listItemId, ownerRoot, targetRoot, scope);
   _activeJobs.add(job);
   job.finally(() => _activeJobs.delete(job)).catch(() => {});
   return job;
@@ -565,11 +634,15 @@ async function _runBackfill(
   lidarrArtistId: number,
   listItemId: number,
   ownerRoot: string,
-  targetRoot: string
+  targetRoot: string,
+  scope: MirrorScope
 ): Promise<void> {
   const db = getDb();
 
-  console.log(`[mirror] backfill start — listItem=${listItemId} lidarrArtist=${lidarrArtistId} target="${targetRoot}"`);
+  console.log(
+    `[mirror] backfill start — listItem=${listItemId} lidarrArtist=${lidarrArtistId} ` +
+    `scope=${scope.type} target="${targetRoot}"`
+  );
 
   db.prepare(
     `UPDATE list_items SET sync_status = 'mirror_active', sync_error = NULL WHERE id = ?`
@@ -579,14 +652,7 @@ async function _runBackfill(
     // Fail fast with a human-readable message if the mount point isn't writable.
     await checkWritable(targetRoot);
 
-    // Sanity check that the list_item still exists. TuneFetch always mirrors
-    // the entire artist into the secondary list — `type` is read only for
-    // the log line below. Rationale for full-artist mirroring: a few extra
-    // copies are negligible compared to the risk of Lidarr later upgrading
-    // or moving a track that the original list_item didn't reference, and
-    // the mirror lacking the file Plex needs. lidarr_track_id /
-    // lidarr_album_id are still set by the orchestrator for monitoring +
-    // AlbumSearch, but they don't constrain mirror scope.
+    // Sanity check that the list_item still exists.
     const listItem = db
       .prepare('SELECT type FROM list_items WHERE id = ?')
       .get(listItemId) as { type: 'artist' | 'album' | 'track' } | undefined;
@@ -598,14 +664,15 @@ async function _runBackfill(
     const allTrackFiles = await getTrackFiles(lidarrArtistId);
 
     // One getTracks call per backfill — used to build the trackFileId →
-    // trackId map so each mirrorTrackFile gets both stable handles (lets the
-    // self-heal path re-resolve via track id if a trackFile is replaced).
-    // Failure is non-fatal: we can still mirror with just trackFileId.
+    // trackId map so each mirrorTrackFile gets both stable handles, AND
+    // to resolve track-level scope (lidarrTrackId → trackFileId).
+    // Failure is non-fatal for handle mapping but critical for track scoping.
+    let allTracks: LidarrTrack[] = [];
     const fileToTrackId = new Map<number, number>();
     try {
-      const allTracks = await getTracks(lidarrArtistId);
+      allTracks = await getTracks(lidarrArtistId);
       for (const t of allTracks) {
-        const tfid = (t as unknown as { trackFileId?: number }).trackFileId;
+        const tfid = t.trackFileId;
         if (tfid && tfid > 0) {
           fileToTrackId.set(tfid, t.id);
         }
@@ -614,19 +681,25 @@ async function _runBackfill(
       console.warn(`[mirror] backfill listItem=${listItemId}: getTracks failed (non-fatal):`, err);
     }
 
-    const trackFiles: LidarrTrackFile[] = allTrackFiles;
+    // Apply scope filtering — only mirror files that match the item's type.
+    const trackFiles = filterTrackFilesByScope(allTrackFiles, scope, allTracks);
 
     console.log(
       `[mirror] backfill listItem=${listItemId} (${listItem.type}): ` +
-      `mirroring full artist — ${trackFiles.length} file(s) currently in Lidarr`
+      `scope=${scope.type} — ${trackFiles.length} of ${allTrackFiles.length} file(s) in scope`
     );
 
     if (trackFiles.length === 0) {
-      // No files on disk yet — stay mirror_pending; webhook will handle copies later.
+      // No files in scope yet — stay mirror_pending.
+      // For scoped items (track/album), the album may not be downloaded yet;
+      // the webhook will handle copies when Lidarr acquires the files.
       db.prepare(
         `UPDATE list_items SET sync_status = 'mirror_pending' WHERE id = ?`
       ).run(listItemId);
-      console.log(`[mirror] backfill listItem=${listItemId}: no files on disk yet → mirror_pending`);
+      console.log(
+        `[mirror] backfill listItem=${listItemId}: no files in scope yet → mirror_pending` +
+        (allTrackFiles.length > 0 ? ` (${allTrackFiles.length} total artist files exist but outside scope)` : '')
+      );
       return;
     }
 
@@ -985,50 +1058,56 @@ export async function verifyMirrorFiles(): Promise<VerifyReport> {
 
   // ── Discover-new pass ───────────────────────────────────────────────────────
   // Find any artist files Lidarr currently has that aren't yet mirrored under
-  // a list that wants them. Targets list_items already in a mirror sync_status
-  // (so we never mirror outside the cross-library set the user opted into).
-  // Same selection rule as the webhook handler at routes/api/webhook/lidarr/+server.ts.
+  // a list that wants them. Targets list_items already in a mirror sync_status.
+  // Now scope-aware: only discovers files matching the item's type (artist/album/track).
+  const primaryRoot = await getLidarrPrimaryRoot();
+
   const candidates = db
     .prepare(
       `SELECT li.id            AS list_item_id,
               li.lidarr_artist_id,
-              ao.root_folder_path AS owner_root,
+              li.type,
+              li.lidarr_album_id,
+              li.lidarr_track_id,
               l.root_folder_path  AS target_root
          FROM list_items li
          JOIN lists l            ON l.id = li.list_id
-         JOIN artist_ownership ao
-           ON ao.lidarr_artist_id = li.lidarr_artist_id
         WHERE li.lidarr_artist_id IS NOT NULL
-          AND l.root_folder_path != ao.root_folder_path
+          AND l.root_folder_path != ?
           AND li.sync_status IN ('mirror_pending','mirror_active','mirror_broken','synced')`
     )
-    .all() as Array<{
+    .all(primaryRoot) as Array<{
       list_item_id: number;
       lidarr_artist_id: number;
-      owner_root: string;
+      type: 'artist' | 'album' | 'track';
+      lidarr_album_id: number | null;
+      lidarr_track_id: number | null;
       target_root: string;
     }>;
 
-  // Per-artist cache of trackFileId → trackId so multiple list_items for the
-  // same artist don't each rebuild the map. The underlying getTracksCached
-  // call is already deduped by artist via ResolveContext, but we'd otherwise
-  // still iterate the track list once per candidate.
+  // Per-artist cache of tracks (for scope resolution and trackFileId → trackId map).
+  // The underlying getTracksCached call is already deduped by artist via
+  // ResolveContext, but we cache the derived data here to avoid re-iterating.
   const trackIdMapByArtist = new Map<number, Map<number, number>>();
-  const getFileToTrackIdMap = async (artistId: number): Promise<Map<number, number>> => {
-    const cached = trackIdMapByArtist.get(artistId);
-    if (cached) return cached;
-    const map = new Map<number, number>();
+  const tracksByArtist = new Map<number, LidarrTrack[]>();
+  const getArtistTracks = async (artistId: number): Promise<{ tracks: LidarrTrack[]; trackMap: Map<number, number> }> => {
+    let tracks = tracksByArtist.get(artistId);
+    let trackMap = trackIdMapByArtist.get(artistId);
+    if (tracks && trackMap) return { tracks, trackMap };
+    tracks = [];
+    trackMap = new Map<number, number>();
     try {
-      const tracks = await getTracksCached(artistId, ctx);
+      tracks = await getTracksCached(artistId, ctx);
       for (const t of tracks) {
-        const tfid = (t as unknown as { trackFileId?: number }).trackFileId;
-        if (tfid && tfid > 0) map.set(tfid, t.id);
+        const tfid = t.trackFileId;
+        if (tfid && tfid > 0) trackMap.set(tfid, t.id);
       }
     } catch {
       // non-fatal — proceed with trackFileId only
     }
-    trackIdMapByArtist.set(artistId, map);
-    return map;
+    tracksByArtist.set(artistId, tracks);
+    trackIdMapByArtist.set(artistId, trackMap);
+    return { tracks, trackMap };
   };
 
   // Insert a pending mirror_files row for a failed copy. Wrapped in its own
@@ -1061,9 +1140,9 @@ export async function verifyMirrorFiles(): Promise<VerifyReport> {
   };
 
   for (const c of candidates) {
-    let trackFiles: LidarrTrackFile[];
+    let allTrackFiles: LidarrTrackFile[];
     try {
-      trackFiles = await getTrackFilesCached(c.lidarr_artist_id, ctx);
+      allTrackFiles = await getTrackFilesCached(c.lidarr_artist_id, ctx);
     } catch (err) {
       console.warn(
         `[mirror] verify discover-new: getTrackFiles failed for artist ${c.lidarr_artist_id} ` +
@@ -1073,7 +1152,16 @@ export async function verifyMirrorFiles(): Promise<VerifyReport> {
       report.errors++;
       continue;
     }
-    if (trackFiles.length === 0) continue;
+    if (allTrackFiles.length === 0) continue;
+
+    // Scope-filter: only discover files matching this item's type.
+    const { tracks: artistTracks, trackMap } = await getArtistTracks(c.lidarr_artist_id);
+    const scope: MirrorScope = {
+      type: c.type,
+      lidarrAlbumId: c.lidarr_album_id ?? undefined,
+      lidarrTrackId: c.lidarr_track_id ?? undefined
+    };
+    const trackFiles = filterTrackFilesByScope(allTrackFiles, scope, artistTracks);
 
     // What does this list_item already have rows for? Match by trackFileId
     // (stable) with a fallback to source_path for legacy rows.
@@ -1094,8 +1182,6 @@ export async function verifyMirrorFiles(): Promise<VerifyReport> {
     );
     const knownSourcePaths = new Set(existing.map((r) => r.source_path));
 
-    const trackMap = await getFileToTrackIdMap(c.lidarr_artist_id);
-
     for (const file of trackFiles) {
       if (knownTrackFileIds.has(file.id) || knownSourcePaths.has(file.path)) continue;
       try {
@@ -1106,8 +1192,8 @@ export async function verifyMirrorFiles(): Promise<VerifyReport> {
         report.discovered++;
         dirtyArtists.add(c.lidarr_artist_id);
         console.log(
-          `[mirror] verify discover-new: copied missing artist file for list_item ${c.list_item_id} ` +
-          `(${file.path})`
+          `[mirror] verify discover-new: copied missing file for list_item ${c.list_item_id} ` +
+          `(scope=${c.type}, ${file.path})`
         );
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -1193,98 +1279,147 @@ export async function backfillLegacyHandles(): Promise<number> {
   return updated;
 }
 
-// ── One-shot repair for corrupted mirror_paths ────────────────────────────────
+// ── Prune out-of-scope mirrors ────────────────────────────────────────────────
 
 /**
- * Find any mirror_files row whose mirror_path is not absolute and rebuild
- * it from the source_path under the list's root folder.
+ * Remove mirror_files rows (and their physical files) that don't match their
+ * parent list_item's scope.
  *
- * Background: an earlier version of the heal logic recomputed mirror_path
- * via a buggy suffix-replace that could drop the leading "/" of an absolute
- * path. Once a relative mirror_path was persisted, every subsequent copy
- * would try to mkdir against the process CWD and fail with EACCES on a
- * read-only working directory.
+ * After migrating from full-artist mirroring to scoped mirroring, there will
+ * be mirror_files rows that were created for the entire artist but the parent
+ * list_item only wanted a single track or album. This function identifies
+ * and removes those out-of-scope rows.
  *
- * This repair runs once on startup, pre-flights every row, and replaces a
- * relative mirror_path with the correct one derived from:
- *   buildMirrorPath(source_path, ownerRoot, targetRoot)
- * where ownerRoot comes from artist_ownership and targetRoot from the
- * row's parent list. Idempotent: rows with absolute mirror_path are
- * untouched, and rows we can't repair (missing ownership / list join)
- * are left as-is with a warning so a human can investigate.
+ * For each mirror_files row:
+ *   1. Load the parent list_item's type, lidarr_album_id, lidarr_track_id
+ *   2. If type = 'artist', the row is always in scope (skip)
+ *   3. For album items: check if the row's track file belongs to the album
+ *   4. For track items: check if the row's track file matches the track
+ *   5. If out of scope → delete the physical file + DB row
+ *
+ * Groups by artist for efficient Lidarr API usage.
  */
-export function repairCorruptedMirrorPaths(): number {
+export async function pruneOutOfScopeMirrors(): Promise<{
+  pruned: number;
+  errors: number;
+}> {
   const db = getDb();
-  const t0 = performance.now();
+  const report = { pruned: 0, errors: 0 };
 
-  // Push the "is the path corrupted?" filter into SQL so we don't scan the
-  // whole table on every startup. The deployment target is Linux (Docker),
-  // so an absolute path always starts with "/". The owner_root subquery
-  // returns at most one row even if the unlikely case of duplicate
-  // artist_ownership rows for a single lidarr_artist_id arises.
+  console.log('[mirror] pruneOutOfScopeMirrors: starting...');
+
+  // Find all mirror_files rows whose parent list_item is track or album scoped.
+  // Artist-scoped items keep everything, so no pruning needed.
   const rows = db
     .prepare(
-      `SELECT mf.id, mf.source_path, mf.mirror_path,
-              l.root_folder_path AS target_root,
-              (SELECT ao.root_folder_path
-                 FROM artist_ownership ao
-                WHERE ao.lidarr_artist_id = li.lidarr_artist_id
-                LIMIT 1) AS owner_root
+      `SELECT mf.id, mf.mirror_path, mf.lidarr_track_file_id,
+              li.id AS list_item_id, li.type, li.lidarr_artist_id,
+              li.lidarr_album_id, li.lidarr_track_id
          FROM mirror_files mf
          JOIN list_items li ON li.id = mf.list_item_id
-         JOIN lists l       ON l.id  = li.list_id
-        WHERE mf.mirror_path NOT LIKE '/%'`
+        WHERE li.type IN ('album', 'track')
+          AND mf.status != 'pending'`
     )
     .all() as Array<{
       id: number;
-      source_path: string;
       mirror_path: string;
-      owner_root: string | null;
-      target_root: string;
+      lidarr_track_file_id: number | null;
+      list_item_id: number;
+      type: 'album' | 'track';
+      lidarr_artist_id: number | null;
+      lidarr_album_id: number | null;
+      lidarr_track_id: number | null;
     }>;
 
-  let repaired = 0;
+  if (rows.length === 0) {
+    console.log('[mirror] pruneOutOfScopeMirrors: no scoped mirror rows to check.');
+    return report;
+  }
+
+  // Cache track files and tracks per artist to avoid redundant Lidarr calls.
+  const trackFileCache = new Map<number, LidarrTrackFile[]>();
+  const tracksCache = new Map<number, LidarrTrack[]>();
+
+  const getArtistData = async (artistId: number) => {
+    if (!trackFileCache.has(artistId)) {
+      try {
+        trackFileCache.set(artistId, await getTrackFiles(artistId));
+      } catch {
+        trackFileCache.set(artistId, []);
+      }
+    }
+    if (!tracksCache.has(artistId)) {
+      try {
+        tracksCache.set(artistId, await getTracks(artistId));
+      } catch {
+        tracksCache.set(artistId, []);
+      }
+    }
+    return {
+      trackFiles: trackFileCache.get(artistId)!,
+      tracks: tracksCache.get(artistId)!
+    };
+  };
+
   for (const row of rows) {
-    // Defensive double-check — the SQL filter is the primary guard, but
-    // isAbsolute() is the authoritative test (handles edge cases the LIKE
-    // pattern misses, e.g. paths that started with whitespace).
-    if (isAbsolute(row.mirror_path)) continue;
+    if (!row.lidarr_artist_id) continue;
 
-    if (!row.owner_root || !isAbsolute(row.source_path)) {
+    try {
+      const { trackFiles: allTrackFiles, tracks: allTracks } =
+        await getArtistData(row.lidarr_artist_id);
+
+      const scope: MirrorScope = {
+        type: row.type,
+        lidarrAlbumId: row.lidarr_album_id ?? undefined,
+        lidarrTrackId: row.lidarr_track_id ?? undefined
+      };
+      const inScopeFiles = filterTrackFilesByScope(allTrackFiles, scope, allTracks);
+      const inScopeIds = new Set(inScopeFiles.map((f) => f.id));
+
+      // If this mirror row's track file ID is NOT in the scoped set, prune it.
+      // Legacy rows may not have a lidarr_track_file_id; we keep them but log that they
+      // could not be evaluated against the current scope.
+      if (row.lidarr_track_file_id == null) {
+        console.info(
+          `[mirror] pruneOutOfScopeMirrors: skipping mirror row ${row.id} with null lidarr_track_file_id (legacy row; cannot verify scope)`
+        );
+      } else if (!inScopeIds.has(row.lidarr_track_file_id)) {
+        // Delete physical file (best-effort)
+        try {
+          await fs.unlink(row.mirror_path);
+        } catch (unlinkErr) {
+          // File already gone or inaccessible — that's fine, still remove the row.
+          if (
+            unlinkErr instanceof Error &&
+            'code' in unlinkErr &&
+            (unlinkErr as NodeJS.ErrnoException).code !== 'ENOENT'
+          ) {
+            console.warn(
+              `[mirror] pruneOutOfScopeMirrors: unlink failed for ${row.mirror_path}:`,
+              unlinkErr
+            );
+          }
+        }
+
+        db.prepare('DELETE FROM mirror_files WHERE id = ?').run(row.id);
+        report.pruned++;
+      }
+    } catch (err) {
       console.warn(
-        `[mirror] repairCorruptedMirrorPaths: cannot repair mirror_file ${row.id} ` +
-        `(mirror_path="${row.mirror_path}", source_path="${row.source_path}", ` +
-        `owner_root=${row.owner_root ?? 'null'}). Leaving for manual cleanup.`
+        `[mirror] pruneOutOfScopeMirrors: error processing mirror_file ${row.id}:`,
+        err
       );
-      continue;
+      report.errors++;
     }
-
-    const fixed = buildMirrorPath(row.source_path, row.owner_root, row.target_root);
-    if (!isAbsolute(fixed)) {
-      console.warn(
-        `[mirror] repairCorruptedMirrorPaths: computed path is still not absolute ` +
-        `for mirror_file ${row.id} ("${fixed}"). Leaving for manual cleanup.`
-      );
-      continue;
-    }
-
-    db.prepare(
-      `UPDATE mirror_files
-          SET mirror_path = ?, status = 'stale', updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?`
-    ).run(fixed, row.id);
-    console.log(
-      `[mirror] repaired mirror_file ${row.id}: "${row.mirror_path}" → "${fixed}" (marked stale)`
-    );
-    repaired++;
   }
 
-  const ms = Math.round(performance.now() - t0);
-  if (rows.length > 0 || ms > 50) {
-    console.log(
-      `[mirror] repairCorruptedMirrorPaths: examined ${rows.length} candidate row(s), ` +
-      `repaired ${repaired} in ${ms}ms`
-    );
-  }
-  return repaired;
+  console.log(
+    `[mirror] pruneOutOfScopeMirrors: done. pruned=${report.pruned} errors=${report.errors} ` +
+    `(checked ${rows.length} scoped mirror rows)`
+  );
+  return report;
 }
+
+// ── One-shot repair for corrupted mirror_paths ────────────────────────────────
+
+

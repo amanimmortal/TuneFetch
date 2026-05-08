@@ -146,30 +146,11 @@ export function getDb(): Database.Database {
     }
   }
 
-  // Migrate artist_ownership: add ON DELETE SET NULL to owner_list_id FK.
-  // SQLite does not support ALTER TABLE ... ALTER COLUMN, so recreate if needed.
-  {
-    const fkList = db.prepare("PRAGMA foreign_key_list(artist_ownership)").all() as Array<{
-      from: string; on_delete: string;
-    }>;
-    const ownerFk = fkList.find((c) => c.from === 'owner_list_id');
-    if (ownerFk && ownerFk.on_delete !== 'SET NULL') {
-      db.exec(`
-        BEGIN;
-        CREATE TABLE artist_ownership_new (
-          id               INTEGER PRIMARY KEY,
-          artist_mbid      TEXT NOT NULL UNIQUE,
-          lidarr_artist_id INTEGER NOT NULL,
-          owner_list_id    INTEGER REFERENCES lists(id) ON DELETE SET NULL,
-          root_folder_path TEXT NOT NULL,
-          created_at       DATETIME DEFAULT CURRENT_TIMESTAMP
-        );
-        INSERT INTO artist_ownership_new SELECT * FROM artist_ownership;
-        DROP TABLE artist_ownership;
-        ALTER TABLE artist_ownership_new RENAME TO artist_ownership;
-        COMMIT;
-      `);
-    }
+  // Drop legacy artist_ownership table from multi-root architecture.
+  try {
+    db.exec('DROP TABLE IF EXISTS artist_ownership');
+  } catch (err) {
+    console.error('[migration] Failed to drop legacy artist_ownership table:', err);
   }
 
   // Encrypt existing plaintext Plex tokens (pre-P1-4 rows).
