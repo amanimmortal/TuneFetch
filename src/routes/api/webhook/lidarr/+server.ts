@@ -243,7 +243,7 @@ export const POST: RequestHandler = async ({ request }) => {
   const tasks: Promise<void>[] = [];
 
   for (const candidate of mirrorCandidates) {
-    const scope: MirrorScope = {
+    const scope = {
       type: candidate.type,
       lidarrAlbumId: candidate.lidarr_album_id ?? undefined,
       lidarrTrackId: candidate.lidarr_track_id ?? undefined

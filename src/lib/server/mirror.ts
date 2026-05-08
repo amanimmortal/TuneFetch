@@ -65,9 +65,7 @@ export function filterTrackFilesByScope(
 
   if (scope.type === 'track' && scope.lidarrTrackId != null && allTracks) {
     const track = allTracks.find((t) => t.id === scope.lidarrTrackId);
-    const trackFileId = track
-      ? (track as unknown as { trackFileId?: number }).trackFileId
-      : undefined;
+    const trackFileId = track?.trackFileId;
     if (trackFileId && trackFileId > 0) {
       const file = allTrackFiles.filter((f) => f.id === trackFileId);
       if (file.length > 0) return file;
@@ -314,9 +312,7 @@ async function resolveCurrentSourcePath(
       tracks = [];
     }
     const track = tracks.find((t) => t.id === row.lidarr_track_id);
-    const newTrackFileId = track
-      ? (track as unknown as { trackFileId?: number }).trackFileId
-      : undefined;
+    const newTrackFileId = track?.trackFileId;
     if (newTrackFileId && newTrackFileId > 0) {
       const file = trackFiles.find((f) => f.id === newTrackFileId);
       if (file) {
@@ -676,7 +672,7 @@ async function _runBackfill(
     try {
       allTracks = await getTracks(lidarrArtistId);
       for (const t of allTracks) {
-        const tfid = (t as unknown as { trackFileId?: number }).trackFileId;
+        const tfid = t.trackFileId;
         if (tfid && tfid > 0) {
           fileToTrackId.set(tfid, t.id);
         }
@@ -1103,7 +1099,7 @@ export async function verifyMirrorFiles(): Promise<VerifyReport> {
     try {
       tracks = await getTracksCached(artistId, ctx);
       for (const t of tracks) {
-        const tfid = (t as unknown as { trackFileId?: number }).trackFileId;
+        const tfid = t.trackFileId;
         if (tfid && tfid > 0) trackMap.set(tfid, t.id);
       }
     } catch {
@@ -1381,7 +1377,13 @@ export async function pruneOutOfScopeMirrors(): Promise<{
       const inScopeIds = new Set(inScopeFiles.map((f) => f.id));
 
       // If this mirror row's track file ID is NOT in the scoped set, prune it.
-      if (row.lidarr_track_file_id != null && !inScopeIds.has(row.lidarr_track_file_id)) {
+      // Legacy rows may not have a lidarr_track_file_id; we keep them but log that they
+      // could not be evaluated against the current scope.
+      if (row.lidarr_track_file_id == null) {
+        console.info(
+          `[mirror] pruneOutOfScopeMirrors: skipping mirror row ${row.id} with null lidarr_track_file_id (legacy row; cannot verify scope)`
+        );
+      } else if (!inScopeIds.has(row.lidarr_track_file_id)) {
         // Delete physical file (best-effort)
         try {
           await fs.unlink(row.mirror_path);

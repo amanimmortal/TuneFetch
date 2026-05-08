@@ -7,7 +7,15 @@ import os from 'os';
 export const GET: RequestHandler = async ({ url }) => {
 	// Default to /music in prod (Docker), fallback to home dir in local dev if not found
 	const defaultPath = process.env.NODE_ENV === 'production' || process.env.TUNE_FETCH_DOCKER ? '/music' : os.homedir();
-	const dirPath = url.searchParams.get('path') || defaultPath;
+	const requestedPath = url.searchParams.get('path') || defaultPath;
+	
+	const baseDir = path.resolve(defaultPath);
+	const dirPath = path.resolve(requestedPath);
+
+	// Security check: ensure the resolved path starts with the base directory
+	if (!dirPath.startsWith(baseDir)) {
+		return json({ error: 'Access denied' }, { status: 403 });
+	}
 
 	try {
 		const stat = await fs.stat(dirPath);

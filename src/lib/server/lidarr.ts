@@ -103,6 +103,7 @@ export interface LidarrTrack {
 	albumId: number;
 	title: string;
 	monitored: boolean;
+	trackFileId?: number;
 	[key: string]: unknown;
 }
 

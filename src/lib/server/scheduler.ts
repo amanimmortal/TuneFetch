@@ -185,9 +185,12 @@ async function _runOrphanScanCore(): Promise<void> {
   console.log('[scheduler] Starting orphan scan...');
 
   try {
-    const pruned = await pruneOutOfScopeMirrors();
+    const { pruned, errors } = await pruneOutOfScopeMirrors();
     if (pruned > 0) {
       console.log(`[scheduler] Pruned ${pruned} out-of-scope mirror file(s).`);
+    }
+    if (errors > 0) {
+      console.error(`[scheduler] Failed to prune ${errors} out-of-scope mirror file(s).`);
     }
   } catch (err) {
     console.error('[scheduler] Failed to prune out-of-scope mirrors:', err);
