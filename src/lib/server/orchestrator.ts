@@ -55,14 +55,6 @@ interface ListRow {
 	metadata_profile_id: number | null;
 }
 
-interface OwnershipRow {
-	id: number;
-	artist_mbid: string;
-	lidarr_artist_id: number;
-	owner_list_id: number;
-	root_folder_path: string;
-}
-
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /**
@@ -305,14 +297,11 @@ async function scenarioA(item: ListItemRow, list: ListRow): Promise<void> {
 		});
 		lidarrArtistId = lidarrArtist.id;
 
-		upsertOwnership(item.mbid, lidarrArtist.id, list.id, primaryRoot);
-
 		// Trigger artist search
 		await runCommand('ArtistSearch', { artistId: lidarrArtist.id });
 	} else {
 		// Artist already in Lidarr
 		lidarrArtistId = existing.id;
-		upsertOwnership(item.mbid, existing.id, list.id, existing.rootFolderPath);
 	}
 
 	if (list.root_folder_path !== primaryRoot) {
@@ -339,17 +328,25 @@ async function scenarioB(item: ListItemRow, list: ListRow): Promise<void> {
 	const primaryRoot = await getLidarrPrimaryRoot();
 
 	// Resolve the Lidarr artist for this track.
+	// Always prefer MBID-based resolution — the cached lidarr_artist_id can be stale
+	// (e.g. if a previous sync erroneously wrote the wrong artist's ID).
 	let lidarrArtistId = item.lidarr_artist_id;
 
-	if (!lidarrArtistId && item.artist_mbid) {
+	if (item.artist_mbid) {
 		const existing = await getArtistByMbid(item.artist_mbid);
 		if (existing) {
+			if (lidarrArtistId && lidarrArtistId !== existing.id) {
+				console.warn(
+					`[orchestrator] item ${item.id} ("${item.title}"): cached lidarr_artist_id ` +
+					`${lidarrArtistId} overridden by MBID lookup → ${existing.id} ("${existing.artistName}")`
+				);
+			}
 			lidarrArtistId = existing.id;
 		}
 	}
 
 	if (!lidarrArtistId) {
-		// Auto-add artist with monitor=none so only this track gets monitored.
+		// Artist not yet in Lidarr — add it with monitor=none so only this track gets monitored.
 		if (!item.artist_mbid) {
 			markFailed(
 				item.id,
@@ -362,7 +359,6 @@ async function scenarioB(item: ListItemRow, list: ListRow): Promise<void> {
 		const existing = await getArtistByMbid(item.artist_mbid);
 		if (existing) {
 			lidarrArtistId = existing.id;
-			upsertOwnership(item.artist_mbid, existing.id, list.id, existing.rootFolderPath);
 			if (!existing.monitored) {
 				await updateArtist({ ...existing, monitored: true });
 			}
@@ -378,7 +374,6 @@ async function scenarioB(item: ListItemRow, list: ListRow): Promise<void> {
 				addOptions: { monitor: 'none', searchForMissingAlbums: false }
 			});
 			lidarrArtistId = lidarrArtist.id;
-			upsertOwnership(item.artist_mbid, lidarrArtist.id, list.id, primaryRoot);
 		}
 	}
 
@@ -391,7 +386,7 @@ async function scenarioB(item: ListItemRow, list: ListRow): Promise<void> {
 		const hint = tracks.length === 0
 			? 'Lidarr returned 0 tracks — metadata may not have synced yet, retry in a few minutes.'
 			: `Lidarr returned ${tracks.length} track(s) but none matched. Sample: [${sample}]`;
-		markFailed(item.id, `Track "${item.title}" not found in Lidarr. ${hint}`);
+		markFailed(item.id, `Track "${item.title}" not found in Lidarr (artist ID ${lidarrArtistId}, artist MBID ${item.artist_mbid ?? 'unknown'}). ${hint}`);
 		return;
 	}
 
@@ -427,11 +422,18 @@ async function scenarioC(item: ListItemRow, list: ListRow): Promise<void> {
 	const db = getDb();
 	const primaryRoot = await getLidarrPrimaryRoot();
 
+	// Always prefer MBID-based resolution — the cached lidarr_artist_id can be stale.
 	let lidarrArtistId = item.lidarr_artist_id;
 
-	if (!lidarrArtistId && item.artist_mbid) {
+	if (item.artist_mbid) {
 		const existing = await getArtistByMbid(item.artist_mbid);
 		if (existing) {
+			if (lidarrArtistId && lidarrArtistId !== existing.id) {
+				console.warn(
+					`[orchestrator] item ${item.id} ("${item.title}"): cached lidarr_artist_id ` +
+					`${lidarrArtistId} overridden by MBID lookup → ${existing.id} ("${existing.artistName}")`
+				);
+			}
 			lidarrArtistId = existing.id;
 		}
 	}
@@ -450,7 +452,6 @@ async function scenarioC(item: ListItemRow, list: ListRow): Promise<void> {
 		const existing = await getArtistByMbid(item.artist_mbid);
 		if (existing) {
 			lidarrArtistId = existing.id;
-			upsertOwnership(item.artist_mbid, existing.id, list.id, existing.rootFolderPath);
 			if (!existing.monitored) {
 				await updateArtist({ ...existing, monitored: true });
 			}
@@ -466,7 +467,6 @@ async function scenarioC(item: ListItemRow, list: ListRow): Promise<void> {
 				addOptions: { monitor: 'none', searchForMissingAlbums: false }
 			});
 			lidarrArtistId = lidarrArtist.id;
-			upsertOwnership(item.artist_mbid, lidarrArtist.id, list.id, primaryRoot);
 		}
 	}
 

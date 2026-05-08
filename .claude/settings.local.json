@@ -10,7 +10,10 @@
       "Bash(git commit -m ' *)",
       "Bash(git push *)",
       "Bash(Get-ChildItem -Path \"D:\\\\GitHub\\\\TuneFetch\" -Recurse -Directory)",
-      "Bash(Select-Object -ExpandProperty FullName)"
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "Bash(xargs grep -l \"resolveTrackForListItem\\\\|normalizeTitle\")",
+      "Bash(Select-String -Pattern \"upsertOwnership\" -Path \"D:\\\\GitHub\\\\TuneFetch\\\\src\\\\lib\\\\server\\\\orchestrator.ts\" -AllMatches)",
+      "Bash(Select-Object LineNumber, Line)"
     ]
   }
 }
