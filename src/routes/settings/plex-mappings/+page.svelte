@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { PageData } from './$types';
   import { invalidateAll } from '$app/navigation';
+  import FolderPicker from '$lib/components/FolderPicker.svelte';
 
   export let data: PageData;
 
@@ -257,32 +258,17 @@
       {/if}
 
       <div>
-        <label for="root_folder_select" class="mb-1 block text-sm font-medium text-slate-300">
-          Lidarr Root Folder Path
+        <label for="root_folder_path" class="mb-1 block text-sm font-medium text-slate-300">
+          User Music Folder Path
         </label>
-        {#if data.rootFolders.length > 0}
-          <select
-            id="root_folder_select"
-            class="input"
-            bind:value={selectedRootPath}
-          >
-            <option value="">Select a root folder…</option>
-            {#each data.rootFolders as folder}
-              <option value={folder.path}>{folder.path}</option>
-            {/each}
-          </select>
-        {:else}
-          <input
-            id="root_folder_select"
-            type="text"
-            class="input"
-            bind:value={selectedRootPath}
-            placeholder="/mnt/music/ben"
-          />
-          <p class="mt-1 text-xs text-slate-500">
-            Lidarr root folders couldn't be loaded. Enter the path manually.
-          </p>
-        {/if}
+        <p class="mb-2 text-xs text-slate-400">
+          Browse and select the subfolder under <code>/music</code> that this Plex user should have access to.
+        </p>
+        <FolderPicker
+          id="root_folder_path"
+          name="root_folder_path"
+          bind:value={selectedRootPath}
+        />
       </div>
 
       <div>
