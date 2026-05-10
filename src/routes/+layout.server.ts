@@ -1,6 +1,5 @@
 import type { LayoutServerLoad } from './$types';
-
-export const ADMIN_COOKIE = 'adminMode';
+import { ADMIN_COOKIE } from '$lib/server/adminMode';
 
 export const load: LayoutServerLoad = async ({ locals, cookies }) => {
   const isAdmin = cookies.get(ADMIN_COOKIE) === 'true';

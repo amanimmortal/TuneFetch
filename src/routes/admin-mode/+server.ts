@@ -1,5 +1,5 @@
 import { redirect, type RequestHandler } from '@sveltejs/kit';
-import { ADMIN_COOKIE } from '../+layout.server';
+import { ADMIN_COOKIE } from '$lib/server/adminMode';
 
 export const POST: RequestHandler = async ({ request, cookies, url }) => {
   const form = await request.formData();
