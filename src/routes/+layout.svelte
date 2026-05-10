@@ -8,12 +8,20 @@
   $: pathname = $page.url.pathname;
   $: chromeless = pathname === '/login' || pathname === '/setup';
 
-  const navItems = [
+  const ADMIN_NAV = [
     { href: '/', label: 'Search' },
-    { href: '/lists', label: 'Lists' },
+    { href: '/lists', label: 'Playlists' },
     { href: '/mirrors', label: 'Mirror Health' },
     { href: '/settings', label: 'Settings' }
   ];
+
+  const SIMPLE_NAV = [
+    { href: '/', label: 'Search' },
+    { href: '/lists', label: 'Playlists' }
+  ];
+
+  $: navItems = data.isAdmin ? ADMIN_NAV : SIMPLE_NAV;
+  $: redirectTo = $page.url.pathname + $page.url.search;
 
   const isActive = (p: string, href: string) =>
     href === '/' ? p === '/' : p === href || p.startsWith(href + '/');
@@ -45,7 +53,18 @@
         </nav>
         <div class="flex items-center gap-3">
           {#if data.user}
-            <span class="text-sm text-slate-400">{data.user.username}</span>
+            <span class="hidden text-sm text-slate-400 sm:inline">{data.user.username}</span>
+            <form method="POST" action="/admin-mode">
+              <input type="hidden" name="value" value={data.isAdmin ? 'false' : 'true'} />
+              <input type="hidden" name="redirectTo" value={redirectTo} />
+              <button
+                type="submit"
+                class="rounded-md px-2 py-1 text-xs font-medium text-slate-500 hover:text-slate-200"
+                title={data.isAdmin ? 'Switch to simple mode' : 'Switch to admin mode'}
+              >
+                {data.isAdmin ? 'Admin: on' : 'Admin: off'}
+              </button>
+            </form>
             <form method="POST" action="/logout">
               <button type="submit" class="btn-secondary text-xs">Sign out</button>
             </form>

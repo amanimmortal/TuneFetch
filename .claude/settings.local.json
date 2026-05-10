@@ -13,7 +13,8 @@
       "Bash(Select-Object -ExpandProperty FullName)",
       "Bash(xargs grep -l \"resolveTrackForListItem\\\\|normalizeTitle\")",
       "Bash(Select-String -Pattern \"upsertOwnership\" -Path \"D:\\\\GitHub\\\\TuneFetch\\\\src\\\\lib\\\\server\\\\orchestrator.ts\" -AllMatches)",
-      "Bash(Select-Object LineNumber, Line)"
+      "Bash(Select-Object LineNumber, Line)",
+      "Bash(git stash *)"
     ]
   }
 }

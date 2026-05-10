@@ -6,6 +6,8 @@
   export let data: PageData;
   export let form: ActionData;
 
+  $: isAdmin = data.isAdmin;
+
   // ── Local UI state ─────────────────────────────────────────────────────────
   let renamingId: number | null = null;
   let editingSettingsId: number | null = null;
@@ -30,24 +32,32 @@
 </script>
 
 <svelte:head>
-  <title>Lists · TuneFetch</title>
+  <title>Playlists · TuneFetch</title>
 </svelte:head>
 
 <section class="space-y-6">
   <header class="flex items-center justify-between">
     <div>
-      <h1 class="text-2xl font-semibold tracking-tight">Lists</h1>
-      <p class="mt-1 text-sm text-slate-400">
-        Each list maps to a person and a Lidarr root folder.
-      </p>
+      <h1 class="text-2xl font-semibold tracking-tight">Playlists</h1>
+      {#if isAdmin}
+        <p class="mt-1 text-sm text-slate-400">
+          Each list maps to a person and a Lidarr root folder.
+        </p>
+      {:else}
+        <p class="mt-1 text-sm text-slate-400">
+          Choose a playlist to view or edit.
+        </p>
+      {/if}
     </div>
-    <button class="btn-primary" on:click={() => (showCreateForm = !showCreateForm)}>
-      {showCreateForm ? "Cancel" : "New list"}
-    </button>
+    {#if isAdmin}
+      <button class="btn-primary" on:click={() => (showCreateForm = !showCreateForm)}>
+        {showCreateForm ? "Cancel" : "New list"}
+      </button>
+    {/if}
   </header>
 
   <!-- ── Create form ──────────────────────────────────────────────────────── -->
-  {#if showCreateForm}
+  {#if isAdmin && showCreateForm}
     <form
       class="card space-y-4"
       method="POST"
@@ -120,35 +130,39 @@
           <div class="flex items-start justify-between gap-4">
             <div>
               <h2 class="font-semibold text-slate-100">{list.name}</h2>
-              <p class="mt-0.5 font-mono text-xs text-slate-500">{list.root_folder_path}</p>
+              {#if isAdmin}
+                <p class="mt-0.5 font-mono text-xs text-slate-500">{list.root_folder_path}</p>
+              {/if}
               <p class="mt-1 text-xs text-slate-400">
-                {list.item_count} item{list.item_count !== 1 ? "s" : ""}
+                {list.item_count} {isAdmin ? `item${list.item_count !== 1 ? "s" : ""}` : `song${list.item_count !== 1 ? "s" : ""}`}
               </p>
             </div>
 
             <div class="flex shrink-0 gap-2">
-              <a href="/lists/{list.id}" class="btn-secondary text-sm">View</a>
-              <button
-                class="btn-secondary text-sm"
-                on:click={() => (renamingId = renamingId === list.id ? null : list.id)}
-              >
-                {renamingId === list.id ? "Cancel" : "Rename"}
-              </button>
-              <button
-                class="btn-secondary text-sm"
-                on:click={() => (editingSettingsId = editingSettingsId === list.id ? null : list.id)}
-              >
-                {editingSettingsId === list.id ? "Cancel" : "Settings"}
-              </button>
-              <form method="POST" action="?/delete" use:enhance>
-                <input type="hidden" name="id" value={list.id} />
-                <button type="submit" class="btn-danger text-sm">Delete</button>
-              </form>
+              <a href="/lists/{list.id}" class="btn-primary h-11 px-4 text-base">View</a>
+              {#if isAdmin}
+                <button
+                  class="btn-secondary text-sm"
+                  on:click={() => (renamingId = renamingId === list.id ? null : list.id)}
+                >
+                  {renamingId === list.id ? "Cancel" : "Rename"}
+                </button>
+                <button
+                  class="btn-secondary text-sm"
+                  on:click={() => (editingSettingsId = editingSettingsId === list.id ? null : list.id)}
+                >
+                  {editingSettingsId === list.id ? "Cancel" : "Settings"}
+                </button>
+                <form method="POST" action="?/delete" use:enhance>
+                  <input type="hidden" name="id" value={list.id} />
+                  <button type="submit" class="btn-danger text-sm">Delete</button>
+                </form>
+              {/if}
             </div>
           </div>
 
           <!-- Inline rename form -->
-          {#if renamingId === list.id}
+          {#if isAdmin && renamingId === list.id}
             <form
               class="flex items-center gap-2 border-t border-slate-700 pt-3"
               method="POST"
@@ -172,7 +186,7 @@
           {/if}
 
           <!-- Inline settings form -->
-          {#if editingSettingsId === list.id}
+          {#if isAdmin && editingSettingsId === list.id}
             <form
               class="space-y-3 border-t border-slate-700 pt-3"
               method="POST"
@@ -212,7 +226,7 @@
           {/if}
 
           <!-- Delete warning panel -->
-          {#if deleteWarning && deleteId === list.id}
+          {#if isAdmin && deleteWarning && deleteId === list.id}
             <div class="space-y-3 rounded-lg border border-amber-700 bg-amber-950/40 p-4 text-sm">
               {#if blocked.length > 0}
                 <p class="font-medium text-amber-300">Cannot delete — ownership conflict</p>

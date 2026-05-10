@@ -4,8 +4,10 @@
 
   export let data: PageData;
 
-  // Sync status display config
-  const STATUS_CONFIG: Record<string, { label: string; classes: string }> = {
+  $: isAdmin = data.isAdmin;
+
+  // Sync status display config — admin sees technical labels, simple mode sees friendly ones.
+  const ADMIN_STATUS: Record<string, { label: string; classes: string }> = {
     pending:        { label: 'Pending',         classes: 'bg-slate-700 text-slate-300' },
     synced:         { label: 'Synced',          classes: 'bg-green-900/60 text-green-300 border border-green-700' },
     failed:         { label: 'Failed',          classes: 'bg-red-900/60 text-red-300 border border-red-700' },
@@ -14,8 +16,20 @@
     mirror_broken:  { label: 'Mirror broken',   classes: 'bg-orange-900/60 text-orange-300 border border-orange-700' }
   };
 
+  const SIMPLE_STATUS: Record<string, { label: string; classes: string } | null> = {
+    pending:        { label: 'Working…',  classes: 'bg-sky-900/60 text-sky-300 border border-sky-700' },
+    synced:         null,
+    failed:         { label: 'Error',     classes: 'bg-red-900/60 text-red-300 border border-red-700' },
+    mirror_pending: { label: 'Working…',  classes: 'bg-sky-900/60 text-sky-300 border border-sky-700' },
+    mirror_active:  { label: 'Ready',     classes: 'bg-green-900/60 text-green-300 border border-green-700' },
+    mirror_broken:  { label: 'Error',     classes: 'bg-red-900/60 text-red-300 border border-red-700' }
+  };
+
   function statusCfg(status: string) {
-    return STATUS_CONFIG[status] ?? { label: status, classes: 'bg-slate-700 text-slate-300' };
+    if (isAdmin) {
+      return ADMIN_STATUS[status] ?? { label: status, classes: 'bg-slate-700 text-slate-300' };
+    }
+    return SIMPLE_STATUS[status] ?? null;
   }
 
   const TYPE_LABELS: Record<string, string> = {
@@ -29,7 +43,10 @@
   let removing = new Set<number>();
 
   async function removeItem(itemId: number) {
-    if (!confirm('Remove this item from the list? Mirror files on disk will also be deleted.')) return;
+    const message = isAdmin
+      ? 'Remove this item from the list? Mirror files on disk will also be deleted.'
+      : 'Remove this song from the playlist?';
+    if (!confirm(message)) return;
     removing.add(itemId);
     removing = removing;
     try {
@@ -191,17 +208,20 @@
   <header class="flex items-start justify-between gap-4">
     <div>
       <div class="flex items-center gap-2">
-        <a href="/lists" class="text-sm text-slate-400 hover:text-slate-200">← Lists</a>
+        <a href="/lists" class="text-sm text-slate-400 hover:text-slate-200">← Playlists</a>
       </div>
       <h1 class="mt-1 text-2xl font-semibold tracking-tight">{data.list.name}</h1>
-      <p class="mt-0.5 font-mono text-xs text-slate-500">{data.list.root_folder_path}</p>
+      {#if isAdmin}
+        <p class="mt-0.5 font-mono text-xs text-slate-500">{data.list.root_folder_path}</p>
+      {/if}
     </div>
     <span class="badge bg-slate-700 text-slate-300 mt-1">
-      {data.items.length} item{data.items.length !== 1 ? 's' : ''}
+      {data.items.length} {isAdmin ? `item${data.items.length !== 1 ? 's' : ''}` : `song${data.items.length !== 1 ? 's' : ''}`}
     </span>
   </header>
 
-  <!-- ── Plex Sync Panel ──────────────────────────────────────────────── -->
+  {#if isAdmin}
+  <!-- ── Plex Sync Panel (admin only) ──────────────────────────────── -->
   <div class="card space-y-4">
     <div class="flex items-center justify-between">
       <h2 class="text-lg font-medium text-slate-200">Plex Playlists</h2>
@@ -349,14 +369,17 @@
       </div>
     {/if}
   </div>
+  {/if}
 
   <!-- Items -->
   {#if data.items.length === 0}
     <div class="card text-sm text-slate-400">
-      No items in this list yet. Search for music and add it here.
+      {isAdmin
+        ? 'No items in this list yet. Search for music and add it here.'
+        : 'No songs in this playlist yet. Search for music and add it here.'}
     </div>
   {:else}
-    {#if retryableItems.length > 0}
+    {#if isAdmin && retryableItems.length > 0}
       <div class="flex justify-end">
         <button
           class="btn-secondary text-xs py-1 px-3 disabled:opacity-50"
@@ -376,9 +399,11 @@
             <div class="min-w-0 flex-1">
               <div class="flex flex-wrap items-center gap-2">
                 <span class="font-medium text-slate-100 truncate">{item.title}</span>
-                <span class="badge bg-slate-800 text-slate-400 capitalize shrink-0">
-                  {TYPE_LABELS[item.type] ?? item.type}
-                </span>
+                {#if isAdmin}
+                  <span class="badge bg-slate-800 text-slate-400 capitalize shrink-0">
+                    {TYPE_LABELS[item.type] ?? item.type}
+                  </span>
+                {/if}
               </div>
               <p class="mt-0.5 text-sm text-slate-400">{item.artist_name}
                 {#if item.album_name}
@@ -389,9 +414,11 @@
 
             <!-- Status badge + actions -->
             <div class="flex shrink-0 items-center gap-2">
-              <span class="badge {cfg.classes}">{cfg.label}</span>
+              {#if cfg}
+                <span class="badge {cfg.classes}">{cfg.label}</span>
+              {/if}
 
-              {#if item.sync_status === 'failed' || item.sync_status === 'mirror_broken' || item.sync_status === 'pending' || item.sync_status === 'mirror_pending'}
+              {#if isAdmin && (item.sync_status === 'failed' || item.sync_status === 'mirror_broken' || item.sync_status === 'pending' || item.sync_status === 'mirror_pending')}
                 <button
                   class="btn-secondary text-xs py-1 px-2 disabled:opacity-50"
                   disabled={retrying.has(item.id)}
@@ -401,35 +428,45 @@
                 </button>
               {/if}
               <button
-                class="text-xs py-1 px-2 rounded text-slate-500 hover:text-red-400 hover:bg-red-950/40 transition-colors disabled:opacity-30"
+                class="rounded text-slate-500 hover:text-red-400 hover:bg-red-950/40 transition-colors disabled:opacity-30 h-11 w-11 flex items-center justify-center text-lg"
                 disabled={removing.has(item.id)}
                 on:click={() => removeItem(item.id)}
                 title="Remove from list"
+                aria-label="Remove"
               >
                 {removing.has(item.id) ? '…' : '✕'}
               </button>
             </div>
           </div>
 
-          <!-- Error detail -->
-          {#if item.sync_status === 'failed' && item.sync_error}
-            <div class="rounded border border-red-800 bg-red-950/40 px-3 py-2 font-mono text-xs text-red-300">
-              {item.sync_error}
-            </div>
-          {/if}
+          {#if isAdmin}
+            <!-- Error detail (admin only) -->
+            {#if item.sync_status === 'failed' && item.sync_error}
+              <div class="rounded border border-red-800 bg-red-950/40 px-3 py-2 font-mono text-xs text-red-300">
+                {item.sync_error}
+              </div>
+            {/if}
 
-          <!-- Mirror pending indicator -->
-          {#if item.sync_status === 'mirror_pending'}
-            <p class="text-xs text-sky-400/80">
-              Waiting for Lidarr to download — will mirror files automatically on download.
-            </p>
-          {/if}
+            <!-- Mirror pending indicator (admin only) -->
+            {#if item.sync_status === 'mirror_pending'}
+              <p class="text-xs text-sky-400/80">
+                Waiting for Lidarr to download — will mirror files automatically on download.
+              </p>
+            {/if}
 
-          <!-- Mirror broken note -->
-          {#if item.sync_status === 'mirror_broken'}
-            <p class="text-xs text-orange-400/80">
-              Mirror copy is broken or missing. Use Retry to attempt repair.
-            </p>
+            <!-- Mirror broken note (admin only) -->
+            {#if item.sync_status === 'mirror_broken'}
+              <p class="text-xs text-orange-400/80">
+                Mirror copy is broken or missing. Use Retry to attempt repair.
+              </p>
+            {/if}
+          {:else}
+            <!-- Simplified status notes -->
+            {#if item.sync_status === 'pending' || item.sync_status === 'mirror_pending'}
+              <p class="text-xs text-sky-400/80">This song is being downloaded.</p>
+            {:else if item.sync_status === 'failed' || item.sync_status === 'mirror_broken'}
+              <p class="text-xs text-red-400/80">Something went wrong. Ask an admin to fix this.</p>
+            {/if}
           {/if}
         </div>
       {/each}
