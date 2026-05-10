@@ -1,9 +1,9 @@
 import { json } from '@sveltejs/kit';
 import type { RequestEvent } from '@sveltejs/kit';
-import { getArtistReleaseGroups } from '$lib/server/musicbrainz';
+import { getArtistReleaseGroups, parseRgFilters } from '$lib/server/musicbrainz';
 import { getDb } from '$lib/server/db';
 
-export const GET = async ({ params }: RequestEvent) => {
+export const GET = async ({ params, url }: RequestEvent) => {
 	const { mbid } = params as { mbid: string };
 
 	if (!mbid) {
@@ -11,7 +11,7 @@ export const GET = async ({ params }: RequestEvent) => {
 	}
 
 	try {
-		const releaseGroups = await getArtistReleaseGroups(mbid);
+		const releaseGroups = await getArtistReleaseGroups(mbid, parseRgFilters(url));
 
 		const typeOrder: Record<string, number> = { Album: 0, EP: 1, Single: 2 };
 		releaseGroups.sort((a, b) => {

@@ -153,6 +153,18 @@ export function getDb(): Database.Database {
     console.error('[migration] Failed to drop legacy artist_ownership table:', err);
   }
 
+  // Bump this constant whenever canonical album resolver logic changes.
+  // On mismatch the entire cache is cleared so stale canonical mappings don't persist.
+  const CANONICAL_RESOLVER_VERSION = 1;
+  {
+    const currentVersion = db.pragma('user_version', { simple: true }) as number;
+    if (currentVersion < CANONICAL_RESOLVER_VERSION) {
+      db.exec('DELETE FROM canonical_album_cache');
+      db.pragma(`user_version = ${CANONICAL_RESOLVER_VERSION}`);
+      console.log('[migration] Cleared canonical_album_cache (resolver version bumped to ' + CANONICAL_RESOLVER_VERSION + ').');
+    }
+  }
+
   // Encrypt existing plaintext Plex tokens (pre-P1-4 rows).
   const mappingRows = db
     .prepare('SELECT id, plex_user_token FROM plex_user_mappings')

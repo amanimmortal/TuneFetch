@@ -1,6 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { searchArtist, searchAlbum, searchTrack, buildQuery, appendTrackFilters } from '$lib/server/musicbrainz';
+import { searchArtist, searchAlbum, searchTrack, buildQuery, appendTrackFilters, parseRgFilters } from '$lib/server/musicbrainz';
 import { resolveCanonicalAlbumCached, recordingPenalty } from '$lib/server/canonicalAlbum';
 import { listArtists, getAlbums } from '$lib/server/lidarr';
 import { getDb } from '$lib/server/db';
@@ -53,7 +53,7 @@ export const GET: RequestHandler = async ({ url }) => {
 			if (albumFilter) fields['releasegroup'] = albumFilter;
 			if (artistFilter) fields['artist'] = artistFilter;
 			query = buildQuery(fields);
-			const arr = await searchAlbum(query);
+			const arr = await searchAlbum(query, parseRgFilters(url));
 			results = arr.map((a) => {
 				const artistName = a['artist-credit']?.[0]?.artist?.name ?? 'Unknown Artist';
 				const artistMbid = a['artist-credit']?.[0]?.artist?.id ?? null;
@@ -84,21 +84,53 @@ export const GET: RequestHandler = async ({ url }) => {
 				arr = await searchTrack(query);
 			}
 
-			const decorated = arr.map((rec) => ({
-				rec,
-				canonical: resolveCanonicalAlbumCached(rec),
-				penalty: recordingPenalty(rec)
-			}));
+			const trackFilters = parseRgFilters(url);
 
+			// Layer 2: penalty for release-group title cues (live sessions, compilations, etc.)
+			const RG_TITLE_PENALTY_REGEX =
+				/\b(live|sessions?|bbc|triple j|like a version|unplugged|acoustic|in concert|at the)\b/i;
+			function rgTitlePenalty(title: string | undefined): number {
+				if (!title) return 0;
+				return RG_TITLE_PENALTY_REGEX.test(title) ? 80 : 0;
+			}
+
+			// Layer 1: filter by canonical tier when strict filters are on
+			const decorated = arr
+				.map((rec) => ({
+					rec,
+					canonical: resolveCanonicalAlbumCached(rec),
+					penalty: recordingPenalty(rec)
+				}))
+				.filter(({ canonical }) => {
+					if (!trackFilters.excludeSecondaryTypes && trackFilters.primaryTypes.length === 0) return true;
+					if (!canonical) return false;
+					if (trackFilters.primaryTypes.length > 0) {
+						const allowAlbum = trackFilters.primaryTypes.includes('Album');
+						const allowEpSing =
+							trackFilters.primaryTypes.includes('EP') || trackFilters.primaryTypes.includes('Single');
+						if (canonical.tier === 1 && !allowAlbum) return false;
+						if (canonical.tier === 2 && !allowEpSing) return false;
+						if (canonical.tier >= 3) return false;
+					}
+					if (trackFilters.excludeSecondaryTypes && canonical.tier !== 1 && canonical.tier !== 2) {
+						return false;
+					}
+					return true;
+				});
+
+			// Layer 2+3: include RG title penalty; prefer latest album as final tiebreak
 			decorated.sort((a, b) => {
 				const tA = a.canonical?.tier ?? 5;
 				const tB = b.canonical?.tier ?? 5;
 				if (tA !== tB) return tA - tB;
-				if (a.penalty !== b.penalty) return a.penalty - b.penalty;
+				const pA = a.penalty + rgTitlePenalty(a.canonical?.title);
+				const pB = b.penalty + rgTitlePenalty(b.canonical?.title);
+				if (pA !== pB) return pA - pB;
 				const sA = a.rec.score ?? 0;
 				const sB = b.rec.score ?? 0;
 				if (sA !== sB) return sB - sA;
-				return (a.canonical?.year ?? '9999').localeCompare(b.canonical?.year ?? '9999');
+				// prefer latest release as final tiebreak (earlier releases are more likely compilations)
+				return (b.canonical?.year ?? '0000').localeCompare(a.canonical?.year ?? '0000');
 			});
 
 			results = decorated.map(({ rec, canonical }) => ({

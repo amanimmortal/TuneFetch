@@ -133,6 +133,72 @@ export const NOISE_SECONDARY_TYPES_JSON: ReadonlySet<string> = new Set(
 		.map(([name]) => name)
 );
 
+// ── Release-group filter types and Lidarr-matching defaults ──────────────────
+export const PRIMARY_TYPES = ['Album', 'EP', 'Single', 'Other', 'Broadcast'] as const;
+export type PrimaryType = (typeof PRIMARY_TYPES)[number];
+
+export interface ReleaseGroupFilters {
+	primaryTypes: PrimaryType[];     // empty = no primary-type restriction
+	excludeSecondaryTypes: boolean;  // true = require no secondary-type ("Studio" in Lidarr terms)
+	officialOnly: boolean;           // true = require status:official (search only; browse limitation)
+}
+
+export const DEFAULT_RG_FILTERS: ReleaseGroupFilters = {
+	primaryTypes: ['Album', 'EP'],
+	excludeSecondaryTypes: true,
+	officialOnly: true
+};
+
+// Lucene fragment builder for the search path.
+// MB Lucene field reference:
+//   primarytype:(Album OR EP)   – multi-value primary type
+//   -secondarytype:*            – release-group has NO secondary types (Lidarr's "Studio")
+//   status:Official             – matches groups with ≥1 Official release
+function buildRgFilterFragment(f: ReleaseGroupFilters): string {
+	const parts: string[] = [];
+	if (f.primaryTypes.length > 0) {
+		parts.push(`primarytype:(${f.primaryTypes.join(' OR ')})`);
+	}
+	if (f.excludeSecondaryTypes) {
+		// Use explicit exclusion list to avoid parser issues with bare -secondarytype:*
+		const excluded = Object.keys(SECONDARY_TYPE_CATALOGUE)
+			.map((t) => escapeLucene(t))
+			.join(' OR ');
+		parts.push(`-secondarytype:(${excluded})`);
+	}
+	if (f.officialOnly) {
+		parts.push('status:official');
+	}
+	return parts.join(' AND ');
+}
+
+// Parse ReleaseGroupFilters from URL search params, falling back to defaults.
+export function parseRgFilters(url: URL): ReleaseGroupFilters {
+	const raw = url.searchParams.get('primaryTypes');
+	const primaryTypes =
+		raw === null
+			? DEFAULT_RG_FILTERS.primaryTypes
+			: raw === ''
+				? []
+				: (raw
+						.split(',')
+						.filter((t): t is PrimaryType =>
+							(PRIMARY_TYPES as readonly string[]).includes(t)
+						));
+
+	const flag = (name: string, fallback: boolean): boolean => {
+		const v = url.searchParams.get(name);
+		if (v === null) return fallback;
+		return v === '1' || v === 'true';
+	};
+
+	return {
+		primaryTypes,
+		excludeSecondaryTypes: flag('studioOnly', DEFAULT_RG_FILTERS.excludeSecondaryTypes),
+		officialOnly: flag('officialOnly', DEFAULT_RG_FILTERS.officialOnly)
+	};
+}
+
 // Result Interfaces
 export interface MBArtist {
 	id: string; // MBID
@@ -146,6 +212,7 @@ export interface MBReleaseGroup {
 	id: string; // MBID
 	title: string;
 	'primary-type'?: string;
+	'secondary-types'?: string[];
 	'first-release-date'?: string;
 	'artist-credit'?: Array<{ artist: { id: string; name: string } }>;
 	score?: number;
@@ -209,8 +276,16 @@ export async function searchArtist(query: string): Promise<MBArtist[]> {
 	return data.artists || [];
 }
 
-export async function searchAlbum(query: string): Promise<MBReleaseGroup[]> {
-	const data = await request<{ 'release-groups': MBReleaseGroup[] }>('/release-group', { query });
+export async function searchAlbum(
+	query: string,
+	filters: ReleaseGroupFilters = DEFAULT_RG_FILTERS
+): Promise<MBReleaseGroup[]> {
+	const fragment = buildRgFilterFragment(filters);
+	const finalQuery = fragment ? `(${query}) AND ${fragment}` : query;
+	const data = await request<{ 'release-groups': MBReleaseGroup[] }>('/release-group', {
+		query: finalQuery,
+		limit: '100'
+	});
 	return data['release-groups'] || [];
 }
 
@@ -236,14 +311,29 @@ export function appendTrackFilters(baseQuery: string): string {
 /**
  * Browse all release groups (albums) for a given artist MBID.
  * Uses the MusicBrainz browse endpoint — does not consume a search slot but still rate-limited.
+ * NOTE: officialOnly is not enforced here — the browse API does not support status filtering
+ * without fetching releases (inc=releases), which doubles payload. See review doc §3.2.
  */
-export async function getArtistReleaseGroups(artistMbid: string): Promise<MBReleaseGroup[]> {
-	// MusicBrainz browse paginates at 100 max. For most artists that covers it.
+export async function getArtistReleaseGroups(
+	artistMbid: string,
+	filters: ReleaseGroupFilters = DEFAULT_RG_FILTERS
+): Promise<MBReleaseGroup[]> {
+	const typeParam =
+		filters.primaryTypes.length > 0
+			? filters.primaryTypes.map((t) => t.toLowerCase()).join('|')
+			: 'album|ep|single|other|broadcast';
+
 	const data = await request<{ 'release-groups': MBReleaseGroup[]; 'release-group-count': number }>(
 		'/release-group',
-		{ artist: artistMbid, type: 'album|ep|single', limit: '100' }
+		{ artist: artistMbid, type: typeParam, limit: '100' }
 	);
-	return data['release-groups'] || [];
+	let groups = data['release-groups'] || [];
+
+	if (filters.excludeSecondaryTypes) {
+		groups = groups.filter((g) => (g['secondary-types'] ?? []).length === 0);
+	}
+
+	return groups;
 }
 
 /**

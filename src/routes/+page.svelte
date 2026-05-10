@@ -30,6 +30,24 @@
 	let albumTracksLoading: Record<string, boolean> = {};
 	let albumTracksError: Record<string, string | null> = {};
 
+	// Advanced filter state — defaults match Lidarr's metadata profile defaults
+	let advancedOpen = false;
+	let primaryAlbum = true;
+	let primaryEP = true;
+	let primarySingle = false;
+	let primaryOther = false;
+	let studioOnly = true;
+	let officialOnly = true;
+
+	$: filtersDiffer =
+		!primaryAlbum || !primaryEP || primarySingle || primaryOther || !studioOnly || !officialOnly;
+
+	// Bust the per-artist album cache whenever filters change
+	$: {
+		primaryAlbum; primaryEP; primarySingle; primaryOther; studioOnly; officialOnly;
+		artistAlbums = {};
+	}
+
 	$: canSearch = !!(artistField.trim() || albumField.trim() || trackField.trim());
 	$: sortedResults = sortResults(results, sortBy);
 
@@ -56,6 +74,17 @@
 		return !!(artistField.trim() || albumField.trim() || trackField.trim());
 	}
 
+	function appendRgFilterParams(p: URLSearchParams) {
+		const primary: string[] = [];
+		if (primaryAlbum) primary.push('Album');
+		if (primaryEP) primary.push('EP');
+		if (primarySingle) primary.push('Single');
+		if (primaryOther) primary.push('Other');
+		p.set('primaryTypes', primary.join(','));
+		p.set('studioOnly', studioOnly ? '1' : '0');
+		p.set('officialOnly', officialOnly ? '1' : '0');
+	}
+
 	async function performSearch() {
 		if (!hasAnyField()) return;
 		searching = true;
@@ -70,6 +99,7 @@
 			if (artistField.trim()) params.set('artist', artistField.trim());
 			if (albumField.trim()) params.set('album', albumField.trim());
 			if (trackField.trim()) params.set('track', trackField.trim());
+			if (type === 'album') appendRgFilterParams(params);
 
 			const res = await fetch(`/api/search?${params.toString()}`);
 			const json = await res.json();
@@ -98,7 +128,9 @@
 		artistAlbumsLoading[artistMbid] = true;
 		artistAlbumsError[artistMbid] = null;
 		try {
-			const res = await fetch(`/api/browse/artist/${artistMbid}`);
+			const p = new URLSearchParams();
+			appendRgFilterParams(p);
+			const res = await fetch(`/api/browse/artist/${artistMbid}?${p.toString()}`);
 			const json = await res.json();
 			if (json.error) {
 				artistAlbumsError[artistMbid] = json.error;
@@ -236,6 +268,50 @@
         {/if}
       {/if}
     </div>
+
+    <!-- Advanced filters (admin only, album + artist types) -->
+    {#if isAdmin && (type === 'album' || type === 'artist')}
+      <div class="border-t border-slate-800 pt-3">
+        <button
+          type="button"
+          class="text-xs text-slate-400 hover:text-slate-200 flex items-center gap-1"
+          on:click={() => (advancedOpen = !advancedOpen)}
+        >
+          <span>{advancedOpen ? '▾' : '▸'}</span>
+          Advanced filters
+          {#if filtersDiffer && !advancedOpen}
+            <span class="badge bg-amber-900/40 text-amber-300 border border-amber-800 ml-1">customised</span>
+          {/if}
+        </button>
+
+        {#if advancedOpen}
+          <div class="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 text-sm">
+            <fieldset class="space-y-1">
+              <legend class="text-xs text-slate-400 mb-1">Primary type</legend>
+              <label class="flex items-center gap-2"><input type="checkbox" bind:checked={primaryAlbum}  class="accent-sky-500" /> Album</label>
+              <label class="flex items-center gap-2"><input type="checkbox" bind:checked={primaryEP}     class="accent-sky-500" /> EP</label>
+              <label class="flex items-center gap-2"><input type="checkbox" bind:checked={primarySingle} class="accent-sky-500" /> Single</label>
+              <label class="flex items-center gap-2"><input type="checkbox" bind:checked={primaryOther}  class="accent-sky-500" /> Other</label>
+            </fieldset>
+            <fieldset class="space-y-1">
+              <legend class="text-xs text-slate-400 mb-1">Secondary type</legend>
+              <label class="flex items-center gap-2">
+                <input type="checkbox" bind:checked={studioOnly} class="accent-sky-500" />
+                Studio only (exclude live, comps, soundtracks, remixes, …)
+              </label>
+            </fieldset>
+            <fieldset class="space-y-1">
+              <legend class="text-xs text-slate-400 mb-1">Release status</legend>
+              <label class="flex items-center gap-2">
+                <input type="checkbox" bind:checked={officialOnly} class="accent-sky-500" />
+                Official only
+              </label>
+              <p class="text-xs text-slate-600">Note: not enforced on artist drill-down (MB browse limitation).</p>
+            </fieldset>
+          </div>
+        {/if}
+      </div>
+    {/if}
 
     <!-- Sort + Submit -->
     <div class="flex flex-wrap gap-3 items-end pt-1">
