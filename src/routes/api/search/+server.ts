@@ -133,7 +133,19 @@ export const GET: RequestHandler = async ({ url }) => {
 				return (b.canonical?.year ?? '0000').localeCompare(a.canonical?.year ?? '0000');
 			});
 
-			results = decorated.map(({ rec, canonical }) => ({
+			// Deduplicate: keep only the best-ranked recording per canonical release group.
+			// MB returns multiple recordings of the same track (album version, single mix,
+			// remaster, etc.) that all resolve to the same release group — they look identical
+			// to the user, so keep only the first (highest-ranked) one.
+			const seenAlbumMbids = new Set<string>();
+			const deduped = decorated.filter(({ canonical }) => {
+				if (!canonical?.releaseGroupMbid) return true;
+				if (seenAlbumMbids.has(canonical.releaseGroupMbid)) return false;
+				seenAlbumMbids.add(canonical.releaseGroupMbid);
+				return true;
+			});
+
+			results = deduped.map(({ rec, canonical }) => ({
 				mbid: rec.id,
 				type: 'track',
 				title: rec.title,
