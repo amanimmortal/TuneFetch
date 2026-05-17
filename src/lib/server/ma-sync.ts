@@ -80,15 +80,23 @@ export async function syncPlaylistToMusicAssistant(
 	const result: MaSyncResult = { ...empty, playlistName: ppRow.playlist_title };
 
 	// Tracks confirmed present in Plex — same set we'd want in MA.
+	// album_name is selected so MA's search can fall back to an album-anchored
+	// match when the per-track artist credited by MA's provider doesn't line up
+	// with what we stored (Various Artists / soundtrack case).
 	const tracks = db
 		.prepare(
-			`SELECT DISTINCT li.id, li.title, li.artist_name
+			`SELECT DISTINCT li.id, li.title, li.artist_name, li.album_name
 			   FROM list_items li
 			   JOIN plex_playlist_items ppi ON ppi.list_item_id = li.id
 			  WHERE ppi.plex_playlist_id_fk = ?
 			    AND li.type = 'track'`
 		)
-		.all(plexPlaylistDbId) as Array<{ id: number; title: string; artist_name: string }>;
+		.all(plexPlaylistDbId) as Array<{
+			id: number;
+			title: string;
+			artist_name: string;
+			album_name: string | null;
+		}>;
 
 	if (tracks.length === 0) return result;
 
@@ -117,7 +125,7 @@ export async function syncPlaylistToMusicAssistant(
 	const foundUris = new Set<string>();
 	await runWithConcurrency(tracks, SEARCH_CONCURRENCY, async (track) => {
 		try {
-			const uri = await searchTrack(track.artist_name, track.title);
+			const uri = await searchTrack(track.artist_name, track.title, track.album_name);
 			if (!uri) {
 				console.log(
 					`[ma-sync] No MA match for list_item ${track.id} ` +

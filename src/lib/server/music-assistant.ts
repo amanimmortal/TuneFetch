@@ -33,6 +33,9 @@ interface MaTrack {
 	name: string;
 	uri: string;
 	artists?: Array<{ name: string }>;
+	/** Album the track belongs to. MA's schema sometimes returns it as a nested
+	 *  object and sometimes as an ItemMapping — both expose `name`. */
+	album?: { name?: string } | null;
 }
 export interface MaPlaylist {
 	item_id: string;
@@ -116,25 +119,47 @@ export async function testConnection(): Promise<boolean> {
  */
 export async function searchTrack(
 	artistName: string,
-	trackTitle: string
+	trackTitle: string,
+	albumName?: string | null
 ): Promise<string | null> {
 	// Title-only search: MA's track search cannot handle artist+title combos
 	// (returns 0 even for "AC DC Thunderstruck"). Title-only works reliably;
-	// we filter by artist client-side from the full Track objects returned.
-	const results = await command<MaSearchResults>('music/search', {
-		search_query: trackTitle,
-		media_types: ['track'],
-		limit: 25
-	});
+	// we filter by artist (and optionally album) client-side from the full
+	// Track objects returned.
+	//
+	// Try a small set of title-search variants until one returns hits. MA's
+	// search backends (Spotify, Apple, local) normalize differently — a curly
+	// apostrophe from MusicBrainz metadata can return 0 results against some
+	// providers but match when sent as straight ASCII.
+	const variants = titleSearchVariants(trackTitle);
+	let tracks: MaTrack[] = [];
+	let queryUsed = variants[0];
+	for (const v of variants) {
+		const results = await command<MaSearchResults>('music/search', {
+			search_query: v,
+			media_types: ['track'],
+			limit: 25
+		});
+		const hits = results.tracks ?? [];
+		if (hits.length > 0) {
+			tracks = hits;
+			queryUsed = v;
+			break;
+		}
+	}
 
-	const tracks = results.tracks ?? [];
 	if (tracks.length === 0) {
-		console.log(`[ma-sync] MA search returned 0 tracks for "${artistName} - ${trackTitle}"`);
+		console.log(
+			`[ma-sync] MA search returned 0 tracks for "${artistName} - ${trackTitle}" ` +
+			`across ${variants.length} title variant(s)`
+		);
 		return null;
 	}
 
 	const wantTitle = normalizeForMatch(trackTitle);
+	const wantAlbum = albumName ? normalizeForMatch(albumName) : '';
 
+	// Tier 1: exact artist + title — most confident.
 	for (const t of tracks) {
 		if (!t.uri || !t.name) continue;
 		if (!titleMatches(t.name, wantTitle)) continue;
@@ -142,18 +167,56 @@ export async function searchTrack(
 		return t.uri;
 	}
 
+	// Tier 2: album + title — catches Various Artists / soundtrack cases where
+	// the per-track artist credited by MA's provider may differ from what we
+	// stored on the list_item (the same problem we solved in Plex sync).
+	if (wantAlbum) {
+		for (const t of tracks) {
+			if (!t.uri || !t.name) continue;
+			if (!titleMatches(t.name, wantTitle)) continue;
+			const tAlbum = normalizeForMatch(t.album?.name ?? '');
+			if (tAlbum && tAlbum === wantAlbum) {
+				console.log(
+					`[ma-sync] Matched "${artistName} - ${trackTitle}" via album-match ` +
+					`(MA: "${t.artists?.[0]?.name ?? '?'} - ${t.name}" on album "${t.album?.name}"` +
+					`${queryUsed !== trackTitle ? `, queryUsed="${queryUsed}"` : ''})`
+				);
+				return t.uri;
+			}
+		}
+	}
+
 	const candidates = tracks
 		.slice(0, 5)
 		.map((t) => {
 			const a = t.artists?.[0]?.name;
-			return a ? `"${t.name}" by ${a}` : `"${t.name}"`;
+			const al = t.album?.name;
+			const base = a ? `"${t.name}" by ${a}` : `"${t.name}"`;
+			return al ? `${base} [${al}]` : base;
 		})
 		.join(', ');
 	console.log(
 		`[ma-sync] No acceptable MA match for "${artistName} - ${trackTitle}" ` +
+			`(album="${albumName ?? ''}"${queryUsed !== trackTitle ? `, queryUsed="${queryUsed}"` : ''}) ` +
 			`among ${tracks.length} result(s). Top: ${candidates}`
 	);
 	return null;
+}
+
+/**
+ * Title-search variants for MA queries. Same intent as the Plex helper of the
+ * same name: try the input verbatim, then with curly quotes flattened, then
+ * with apostrophes stripped, then with all non-alphanumeric stripped. The
+ * first variant that returns hits is used. Duplicates are dropped.
+ */
+function titleSearchVariants(title: string): string[] {
+	const variants = new Set<string>();
+	variants.add(title);
+	const ascii = title.replace(/[‘’‚‛]/g, "'").replace(/[“”„‟]/g, '"');
+	variants.add(ascii);
+	variants.add(ascii.replace(/['"`]/g, ''));
+	variants.add(ascii.replace(/[^\p{L}\p{N}\s]/gu, '').replace(/\s+/g, ' ').trim());
+	return [...variants].filter((v) => v.length > 0);
 }
 
 /**
