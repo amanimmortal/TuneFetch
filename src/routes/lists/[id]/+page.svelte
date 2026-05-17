@@ -8,21 +8,23 @@
 
   // Sync status display config — admin sees technical labels, simple mode sees friendly ones.
   const ADMIN_STATUS: Record<string, { label: string; classes: string }> = {
-    pending:        { label: 'Pending',         classes: 'bg-slate-700 text-slate-300' },
-    synced:         { label: 'Synced',          classes: 'bg-green-900/60 text-green-300 border border-green-700' },
-    failed:         { label: 'Failed',          classes: 'bg-red-900/60 text-red-300 border border-red-700' },
-    mirror_pending: { label: 'Mirror pending',  classes: 'bg-sky-900/60 text-sky-300 border border-sky-700' },
-    mirror_active:  { label: 'Mirror active',   classes: 'bg-blue-900/60 text-blue-300 border border-blue-700' },
-    mirror_broken:  { label: 'Mirror broken',   classes: 'bg-orange-900/60 text-orange-300 border border-orange-700' }
+    pending:           { label: 'Pending',           classes: 'bg-slate-700 text-slate-300' },
+    synced:            { label: 'Synced',            classes: 'bg-green-900/60 text-green-300 border border-green-700' },
+    failed:            { label: 'Failed',            classes: 'bg-red-900/60 text-red-300 border border-red-700' },
+    awaiting_release:  { label: 'Awaiting release',  classes: 'bg-amber-900/60 text-amber-300 border border-amber-700' },
+    mirror_pending:    { label: 'Mirror pending',    classes: 'bg-sky-900/60 text-sky-300 border border-sky-700' },
+    mirror_active:     { label: 'Mirror active',     classes: 'bg-blue-900/60 text-blue-300 border border-blue-700' },
+    mirror_broken:     { label: 'Mirror broken',     classes: 'bg-orange-900/60 text-orange-300 border border-orange-700' }
   };
 
   const SIMPLE_STATUS: Record<string, { label: string; classes: string } | null> = {
-    pending:        { label: 'Working…',  classes: 'bg-sky-900/60 text-sky-300 border border-sky-700' },
-    synced:         null,
-    failed:         { label: 'Error',     classes: 'bg-red-900/60 text-red-300 border border-red-700' },
-    mirror_pending: { label: 'Working…',  classes: 'bg-sky-900/60 text-sky-300 border border-sky-700' },
-    mirror_active:  { label: 'Ready',     classes: 'bg-green-900/60 text-green-300 border border-green-700' },
-    mirror_broken:  { label: 'Error',     classes: 'bg-red-900/60 text-red-300 border border-red-700' }
+    pending:           { label: 'Working…',    classes: 'bg-sky-900/60 text-sky-300 border border-sky-700' },
+    synced:            null,
+    failed:            { label: 'Error',       classes: 'bg-red-900/60 text-red-300 border border-red-700' },
+    awaiting_release:  { label: 'Not found',   classes: 'bg-amber-900/60 text-amber-300 border border-amber-700' },
+    mirror_pending:    { label: 'Working…',    classes: 'bg-sky-900/60 text-sky-300 border border-sky-700' },
+    mirror_active:     { label: 'Ready',       classes: 'bg-green-900/60 text-green-300 border border-green-700' },
+    mirror_broken:     { label: 'Error',       classes: 'bg-red-900/60 text-red-300 border border-red-700' }
   };
 
   function statusCfg(status: string) {
@@ -58,7 +60,7 @@
     }
   }
 
-  const RETRYABLE = new Set(['pending', 'mirror_pending', 'failed', 'mirror_broken']);
+  const RETRYABLE = new Set(['pending', 'mirror_pending', 'failed', 'mirror_broken', 'awaiting_release']);
 
   async function retryItem(itemId: number) {
     retrying.add(itemId);
@@ -418,7 +420,7 @@
                 <span class="badge {cfg.classes}">{cfg.label}</span>
               {/if}
 
-              {#if isAdmin && (item.sync_status === 'failed' || item.sync_status === 'mirror_broken' || item.sync_status === 'pending' || item.sync_status === 'mirror_pending')}
+              {#if isAdmin && (item.sync_status === 'failed' || item.sync_status === 'mirror_broken' || item.sync_status === 'pending' || item.sync_status === 'mirror_pending' || item.sync_status === 'awaiting_release')}
                 <button
                   class="btn-secondary text-xs py-1 px-2 disabled:opacity-50"
                   disabled={retrying.has(item.id)}
@@ -447,6 +449,20 @@
               </div>
             {/if}
 
+            <!-- Awaiting release detail (admin only) — shows Lidarr's reason -->
+            {#if item.sync_status === 'awaiting_release'}
+              <div class="rounded border border-amber-800 bg-amber-950/40 px-3 py-2 text-xs text-amber-200 space-y-1">
+                {#if item.sync_error}
+                  <p class="font-mono">{item.sync_error}</p>
+                {/if}
+                <p class="text-amber-300/80">
+                  Lidarr is set up correctly — but no release was grabbed. Things to check:
+                  Lidarr → Activity → History for this album (rejection reasons),
+                  indexer coverage, and the artist's quality/metadata profile. Retry once you've adjusted.
+                </p>
+              </div>
+            {/if}
+
             <!-- Mirror pending indicator (admin only) -->
             {#if item.sync_status === 'mirror_pending'}
               <p class="text-xs text-sky-400/80">
@@ -464,6 +480,10 @@
             <!-- Simplified status notes -->
             {#if item.sync_status === 'pending' || item.sync_status === 'mirror_pending'}
               <p class="text-xs text-sky-400/80">This song is being downloaded.</p>
+            {:else if item.sync_status === 'awaiting_release'}
+              <p class="text-xs text-amber-400/80">
+                We couldn't find this song yet — it might not be available, or the quality settings rejected it. Ask an admin to take a look.
+              </p>
             {:else if item.sync_status === 'failed' || item.sync_status === 'mirror_broken'}
               <p class="text-xs text-red-400/80">Something went wrong. Ask an admin to fix this.</p>
             {/if}

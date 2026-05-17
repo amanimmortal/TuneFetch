@@ -454,3 +454,42 @@ export function runCommand(
 ): Promise<LidarrCommand> {
 	return request<LidarrCommand>('POST', '/api/v1/command', { name, ...body }, fetchFn);
 }
+
+/** Fetch the current state of a queued/running/finished Lidarr command. */
+export function getCommand(commandId: number, fetchFn?: FetchFn): Promise<LidarrCommand> {
+	return request<LidarrCommand>('GET', `/api/v1/command/${commandId}`, undefined, fetchFn);
+}
+
+/**
+ * A single entry in Lidarr's download queue. Many fields are populated by the
+ * download client and vary, so we type only the bits we actually use.
+ */
+export interface LidarrQueueItem {
+	id: number;
+	artistId?: number;
+	albumId?: number;
+	title?: string;
+	status?: string;
+	trackedDownloadStatus?: string;
+	protocol?: 'usenet' | 'torrent';
+	[key: string]: unknown;
+}
+
+/**
+ * Read Lidarr's current download queue. Used right after an AlbumSearch to
+ * detect whether anything was actually grabbed.
+ *
+ * Lidarr's `/api/v1/queue` returns a paginated wrapper, but we only need the
+ * `records` array and we never expect more than a handful of in-flight items
+ * for one album.
+ */
+export async function getQueue(fetchFn?: FetchFn): Promise<LidarrQueueItem[]> {
+	const response = await request<{ records?: LidarrQueueItem[] } | LidarrQueueItem[]>(
+		'GET',
+		'/api/v1/queue?pageSize=200',
+		undefined,
+		fetchFn
+	);
+	if (Array.isArray(response)) return response;
+	return response.records ?? [];
+}

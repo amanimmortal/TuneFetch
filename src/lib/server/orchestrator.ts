@@ -28,6 +28,8 @@ import {
 	getLidarrPrimaryRoot,
 	lookupAlbumByReleaseGroupMbid,
 	addAlbum,
+	getCommand,
+	getQueue,
 	type LidarrTrack,
 	type LidarrAlbum,
 	type LidarrAlbumLookupResult
@@ -69,6 +71,125 @@ async function pollForTracks(
 			return tracks;
 		}
 		await new Promise((resolve) => setTimeout(resolve, intervalMs));
+	}
+}
+
+/**
+ * Outcome of a triggered AlbumSearch + queue inspection.
+ *
+ * `grabbed` is the number of queue rows pinned to the target album immediately
+ * after the search completed — i.e. how many releases Lidarr handed to the
+ * download client. `summary` is a short human-readable line callers can
+ * surface to the user (stored in `list_items.sync_error` for `awaiting_release`).
+ */
+interface AlbumSearchOutcome {
+	grabbed: number;
+	summary: string;
+}
+
+/**
+ * Trigger an AlbumSearch in Lidarr and surface the outcome in our logs and
+ * to the caller.
+ *
+ * `runCommand('AlbumSearch', ...)` returns as soon as Lidarr has *queued* the
+ * search — it does not block on indexer responses. To know whether anything
+ * was actually grabbed we poll the command until it's `completed`/`failed`,
+ * then look at Lidarr's download queue for items pinned to this album.
+ *
+ * Never throws — on any internal error returns `{ grabbed: 0, summary }` so
+ * the caller can still record a useful status.
+ */
+async function runAndReportAlbumSearch(
+	itemId: number,
+	albumId: number,
+	timeoutMs = 45_000,
+	intervalMs = 3_000
+): Promise<AlbumSearchOutcome> {
+	let cmd;
+	try {
+		cmd = await runCommand('AlbumSearch', { albumIds: [albumId] });
+		console.log(
+			`[orchestrator] item ${itemId}: AlbumSearch command ${cmd.id} queued for album ${albumId} (status="${cmd.status}")`
+		);
+	} catch (err) {
+		console.warn(`[orchestrator] item ${itemId}: AlbumSearch command failed to queue —`, err);
+		return {
+			grabbed: 0,
+			summary: `Lidarr rejected AlbumSearch command for album ${albumId}: ${err instanceof Error ? err.message : String(err)}`
+		};
+	}
+
+	const deadline = Date.now() + timeoutMs;
+	let last = cmd;
+	while (Date.now() < deadline) {
+		// Lidarr command status values: queued → started → completed | failed | aborted.
+		if (last.status === 'completed' || last.status === 'failed' || last.status === 'aborted') break;
+		await new Promise((resolve) => setTimeout(resolve, intervalMs));
+		try {
+			last = await getCommand(cmd.id);
+		} catch (err) {
+			console.warn(`[orchestrator] item ${itemId}: getCommand(${cmd.id}) failed —`, err);
+			return {
+				grabbed: 0,
+				summary: `Lidarr unreachable while polling AlbumSearch command ${cmd.id}.`
+			};
+		}
+	}
+
+	const message = typeof last.message === 'string' ? last.message : '';
+	const commandStatus = String(last.status);
+	console.log(
+		`[orchestrator] item ${itemId}: AlbumSearch command ${cmd.id} finished — ` +
+		`status="${commandStatus}"${message ? ` message="${message}"` : ''}`
+	);
+
+	if (commandStatus !== 'completed') {
+		return {
+			grabbed: 0,
+			summary: `Lidarr AlbumSearch ended with status="${commandStatus}"${message ? ` (${message})` : ''}.`
+		};
+	}
+
+	// Did anything actually land in the download queue? A grab is the signal
+	// that Lidarr found a release that passed quality/profile filters and
+	// handed it off to the download client. No queue entry == no grab.
+	try {
+		const queue = await getQueue();
+		const grabbed = queue.filter((q) => q.albumId === albumId);
+		if (grabbed.length === 0) {
+			console.warn(
+				`[orchestrator] item ${itemId}: AlbumSearch for album ${albumId} produced 0 grabs. ` +
+				`Check Lidarr → Activity → History for "Search" rows on this album — usually means no ` +
+				`indexer had a release that met the quality/metadata profile.`
+			);
+			return {
+				grabbed: 0,
+				summary:
+					`Lidarr searched indexers but no release was grabbed. ` +
+					`Likely causes: no indexer has this release, or the quality/metadata profile rejected ` +
+					`every candidate. Check Lidarr → Activity → History for this album.`
+			};
+		}
+		for (const q of grabbed) {
+			console.log(
+				`[orchestrator] item ${itemId}: AlbumSearch grabbed "${q.title ?? '(no title)'}" ` +
+				`(queue id ${q.id}, protocol=${q.protocol ?? '?'}, status=${q.status ?? '?'})`
+			);
+		}
+		const titles = grabbed
+			.slice(0, 3)
+			.map((q) => q.title ?? '(no title)')
+			.join('; ');
+		return {
+			grabbed: grabbed.length,
+			summary: `Lidarr grabbed ${grabbed.length} release(s): ${titles}${grabbed.length > 3 ? ', …' : ''}`
+		};
+	} catch (err) {
+		console.warn(`[orchestrator] item ${itemId}: failed to read Lidarr queue —`, err);
+		return {
+			grabbed: 0,
+			summary: `Lidarr AlbumSearch completed, but TuneFetch could not read Lidarr's download queue to verify the grab.`
+		};
 	}
 }
 
@@ -316,6 +437,39 @@ function markMirrorPending(itemId: number): void {
 			`UPDATE list_items SET sync_status = 'mirror_pending', sync_error = NULL WHERE id = ?`
 		)
 		.run(itemId);
+}
+
+/**
+ * Mark a list_item as `awaiting_release`: TuneFetch + Lidarr are correctly
+ * configured for this item, but Lidarr's search ran without grabbing anything.
+ *
+ * This is a "needs your attention" state — usually means indexers don't have
+ * the release, or quality/metadata profile filtered every candidate. The user
+ * can retry once indexers update or profiles change.
+ */
+function markAwaitingRelease(
+	itemId: number,
+	summary: string,
+	ids: { lidarrArtistId?: number; lidarrAlbumId?: number; lidarrTrackId?: number }
+): void {
+	console.warn(`[orchestrator] item ${itemId}: awaiting_release — ${summary}`);
+	getDb()
+		.prepare(
+			`UPDATE list_items
+         SET sync_status = 'awaiting_release',
+             sync_error = ?,
+             lidarr_artist_id = COALESCE(?, lidarr_artist_id),
+             lidarr_album_id  = COALESCE(?, lidarr_album_id),
+             lidarr_track_id  = COALESCE(?, lidarr_track_id)
+       WHERE id = ?`
+		)
+		.run(
+			summary,
+			ids.lidarrArtistId ?? null,
+			ids.lidarrAlbumId ?? null,
+			ids.lidarrTrackId ?? null,
+			itemId
+		);
 }
 
 /**
@@ -689,9 +843,25 @@ async function scenarioB(item: ListItemRow, list: ListRow): Promise<void> {
 		}
 	}
 
-	// Trigger album search
+	// Trigger album search and inspect the outcome — if Lidarr didn't grab a
+	// release, surface that on the list_item so the user knows manual
+	// intervention (indexers, profile, wait) may be needed.
 	console.log(`[orchestrator] item ${item.id}: scenarioB — triggering AlbumSearch on album ${target.albumId}`);
-	await runCommand('AlbumSearch', { albumIds: [target.albumId] });
+	const outcome = await runAndReportAlbumSearch(item.id, target.albumId);
+
+	const ids = { lidarrArtistId, lidarrAlbumId: target.albumId, lidarrTrackId: target.id };
+
+	if (outcome.grabbed === 0) {
+		// Nothing was snatched. Persist the Lidarr ids (so retry/backfill can use
+		// them later) and mark awaiting_release. Skip mirror backfill — there's
+		// nothing on disk yet, and the webhook will handle copying once Lidarr
+		// eventually grabs a release.
+		db.prepare(
+			`UPDATE list_items SET lidarr_artist_id = ?, lidarr_album_id = ?, lidarr_track_id = ? WHERE id = ?`
+		).run(lidarrArtistId, target.albumId, target.id, item.id);
+		markAwaitingRelease(item.id, outcome.summary, ids);
+		return;
+	}
 
 	// Cross-library check
 	if (list.root_folder_path !== primaryRoot) {
@@ -707,7 +877,7 @@ async function scenarioB(item: ListItemRow, list: ListRow): Promise<void> {
 		return;
 	}
 
-	markSynced(item.id, { lidarrArtistId, lidarrAlbumId: target.albumId, lidarrTrackId: target.id });
+	markSynced(item.id, ids);
 }
 
 // ── Scenario C: full album add ────────────────────────────────────────────────
@@ -845,9 +1015,19 @@ async function scenarioC(item: ListItemRow, list: ListRow): Promise<void> {
 		}
 	}
 
-	// Trigger album search
+	// Trigger album search and inspect the outcome.
 	console.log(`[orchestrator] item ${item.id}: scenarioC — triggering AlbumSearch on album ${target.id}`);
-	await runCommand('AlbumSearch', { albumIds: [target.id] });
+	const outcome = await runAndReportAlbumSearch(item.id, target.id);
+
+	const ids = { lidarrArtistId, lidarrAlbumId: target.id };
+
+	if (outcome.grabbed === 0) {
+		db.prepare(
+			`UPDATE list_items SET lidarr_artist_id = ?, lidarr_album_id = ? WHERE id = ?`
+		).run(lidarrArtistId, target.id, item.id);
+		markAwaitingRelease(item.id, outcome.summary, ids);
+		return;
+	}
 
 	// Cross-library check
 	if (list.root_folder_path !== primaryRoot) {
@@ -863,5 +1043,5 @@ async function scenarioC(item: ListItemRow, list: ListRow): Promise<void> {
 		return;
 	}
 
-	markSynced(item.id, { lidarrArtistId, lidarrAlbumId: target.id });
+	markSynced(item.id, ids);
 }

@@ -293,14 +293,17 @@ async function runPlexSync(
 			const search = await searchTrackDiagnostic(
 				item.artist_name,
 				item.title,
-				librarySectionId
+				librarySectionId,
+				undefined,
+				item.album_name
 			);
 			if (search.track) {
 				if (search.matchedBy && search.matchedBy !== 'exact') {
 					console.log(
 						`[plex-sync] Matched "${item.artist_name} - ${item.title}" ` +
-						`via ${search.matchedBy} (Plex: "${search.track.grandparentTitle ?? '?'} - ${search.track.title}", ` +
-						`ratingKey ${search.track.ratingKey})`
+						`via ${search.matchedBy} (Plex: "${search.track.grandparentTitle ?? '?'} - ${search.track.title}" ` +
+						`on album "${search.track.parentTitle ?? '?'}", ratingKey ${search.track.ratingKey}` +
+						`${search.queryUsed && search.queryUsed !== item.title ? `, queryUsed="${search.queryUsed}"` : ''})`
 					);
 				}
 				foundItems.push({
@@ -308,15 +311,16 @@ async function runPlexSync(
 					ratingKey: search.track.ratingKey
 				});
 			} else {
+				const queryNote = search.queryUsed && search.queryUsed !== item.title ? ` (last query="${search.queryUsed}")` : '';
 				const detail =
 					search.rawCount === 0
-						? 'no Plex search results — title may be indexed differently or library not yet scanned'
+						? `no Plex search results across normalization variants${queryNote} — title may be indexed differently or library not yet scanned`
 						: search.topCandidate
-						? `${search.rawCount} title-search hit(s); top candidate "${search.topCandidate.artist} - ${search.topCandidate.title}" did not match expected artist/title`
-						: `${search.rawCount} title-search hit(s) but no usable candidate metadata`;
+						? `${search.rawCount} title-search hit(s)${queryNote}; top candidate "${search.topCandidate.artist} - ${search.topCandidate.title}" did not match expected artist/title/album`
+						: `${search.rawCount} title-search hit(s)${queryNote} but no usable candidate metadata`;
 				console.log(
 					`[plex-sync] No Plex match for list_item ${item.id} ` +
-					`"${item.artist_name} - ${item.title}" (sectionId=${librarySectionId}): ${detail}`
+					`"${item.artist_name} - ${item.title}" (album="${item.album_name ?? ''}", sectionId=${librarySectionId}): ${detail}`
 				);
 				result.notFound++;
 				result.unmatched.push({

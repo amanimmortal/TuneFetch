@@ -16,7 +16,8 @@
       "Bash(Select-Object LineNumber, Line)",
       "Bash(git stash *)",
       "Bash(npx svelte-check *)",
-      "Bash(node -e \"const s = require\\('fs'\\).readFileSync\\('D:/GitHub/TuneFetch/src/routes/+page.server.ts','utf8'\\); console.log\\(JSON.stringify\\(s.slice\\(800,1900\\)\\)\\);\")"
+      "Bash(node -e \"const s = require\\('fs'\\).readFileSync\\('D:/GitHub/TuneFetch/src/routes/+page.server.ts','utf8'\\); console.log\\(JSON.stringify\\(s.slice\\(800,1900\\)\\)\\);\")",
+      "Bash(npx vitest *)"
     ]
   }
 }

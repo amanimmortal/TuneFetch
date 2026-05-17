@@ -626,73 +626,177 @@ export async function getUserAccessToken(
  * `rawCount` is how many tracks Plex returned for the title query before we
  * filtered by artist. `topCandidate` is the closest non-match (highest result)
  * — useful for spotting metadata drift like "Track (Remastered 2011)" vs the
- * canonical "Track" title in Lidarr.
+ * canonical "Track" title in Lidarr. `queryUsed` is the actual string we sent
+ * to Plex (may differ from the input after punctuation normalization).
  */
 export interface SearchTrackResult {
 	track: PlexTrack | null;
 	rawCount: number;
 	topCandidate?: { title: string; artist: string };
-	matchedBy?: 'exact' | 'fuzzy-artist-substring' | 'title-only';
+	matchedBy?: 'exact' | 'fuzzy-artist-substring' | 'album-match' | 'title-only';
+	queryUsed?: string;
 }
 
 /**
- * Search for a track in the Plex library by artist name and track title,
- * returning both the match and diagnostic context for misses.
+ * Normalize a title for comparison: lowercased, curly quotes flattened to
+ * straight, accents stripped, all non-alphanumeric removed. Used both for
+ * generating search-query variants and for the post-search candidate match,
+ * so a Plex track tagged "Steve's Lava Chicken" matches our stored title
+ * "Steve’s Lava Chicken".
+ */
+function normalizeForMatch(s: string): string {
+	return s
+		.toLowerCase()
+		.replace(/[‘’‚‛]/g, "'") // curly single quotes → '
+		.replace(/[“”„‟]/g, '"') // curly double quotes → "
+		.normalize('NFD')
+		.replace(/[̀-ͯ]/g, '')             // strip combining diacritics
+		.replace(/[^a-z0-9]/g, '');                  // strip all punctuation/whitespace
+}
+
+/**
+ * Build a small set of title variants to try against Plex's search endpoint.
+ *
+ * Plex's track search is title-substring against its index. The index normally
+ * normalizes punctuation, but library agent + version differences make some
+ * queries fail (most commonly a Unicode curly apostrophe from MusicBrainz
+ * metadata where the indexed value is a straight apostrophe — or vice versa).
+ *
+ * Variants in order:
+ *   1. The title verbatim — works for the majority of cases.
+ *   2. Curly quotes flattened to ASCII — fixes the MB curly-apostrophe issue.
+ *   3. All apostrophes/quotes removed — fixes agents that strip punctuation.
+ *   4. All punctuation removed — last-ditch normalization.
+ *
+ * Duplicates are dropped via the Set so we don't query Plex twice with the
+ * same string.
+ */
+function titleSearchVariants(title: string): string[] {
+	const variants = new Set<string>();
+	variants.add(title);
+	const ascii = title
+		.replace(/[‘’‚‛]/g, "'")
+		.replace(/[“”„‟]/g, '"');
+	variants.add(ascii);
+	variants.add(ascii.replace(/['"`]/g, ''));
+	variants.add(ascii.replace(/[^\p{L}\p{N}\s]/gu, '').replace(/\s+/g, ' ').trim());
+	return [...variants].filter((v) => v.length > 0);
+}
+
+/**
+ * Run one Plex title-search and return the raw track candidates.
+ */
+async function fetchTitleSearch(
+	sectionId: string,
+	query: string,
+	fetchFn?: FetchFn
+): Promise<PlexTrack[]> {
+	const raw = await request<{ MediaContainer: { Metadata?: PlexTrack[] } }>(
+		'GET',
+		`/library/sections/${sectionId}/search?type=10&query=${encodeURIComponent(query)}`,
+		{ fetchFn }
+	);
+	return raw.MediaContainer.Metadata ?? [];
+}
+
+/**
+ * Search for a track in the Plex library by artist name + track title +
+ * (optional) album name, returning both the match and diagnostic context for
+ * misses.
  *
  * Uses the admin token: ratingKeys are library-wide and identical across
  * users, so the lookup itself can run as the owner.
+ *
+ * Strategy:
+ *   1. Title search with up to 4 normalization variants — first variant that
+ *      returns any hits wins; we don't keep searching after that.
+ *   2. Match by exact artist + title.
+ *   3. Match by fuzzy artist substring + title.
+ *   4. If we know the album name, match by album + title — catches the case
+ *      where the recording is credited to one artist (Jack Black) but Plex
+ *      filed the release group under another (Various Artists).
+ *   5. Match by title-only.
  */
 export async function searchTrackDiagnostic(
 	artistName: string,
 	trackTitle: string,
 	sectionId: string,
-	fetchFn?: FetchFn
+	fetchFn?: FetchFn,
+	albumName?: string | null
 ): Promise<SearchTrackResult> {
 	if (!sectionId) {
 		throw new PlexError('No Plex library section ID provided for this user mapping.');
 	}
 
-	const searchQuery = encodeURIComponent(trackTitle);
-	const raw = await request<{
-		MediaContainer: { Metadata?: PlexTrack[] };
-	}>(
-		'GET',
-		`/library/sections/${sectionId}/search?type=10&query=${searchQuery}`,
-		{ fetchFn }
-	);
+	const variants = titleSearchVariants(trackTitle);
+	let results: PlexTrack[] = [];
+	let queryUsed = variants[0];
+	for (const v of variants) {
+		const hits = await fetchTitleSearch(sectionId, v, fetchFn);
+		if (hits.length > 0) {
+			results = hits;
+			queryUsed = v;
+			break;
+		}
+	}
 
-	const results = raw.MediaContainer.Metadata ?? [];
+	if (results.length === 0) {
+		return { track: null, rawCount: 0, queryUsed };
+	}
 
-	const artistLower = artistName.toLowerCase();
-	const titleLower = trackTitle.toLowerCase();
+	const artistNorm = normalizeForMatch(artistName);
+	const titleNorm = normalizeForMatch(trackTitle);
+	const albumNorm = albumName ? normalizeForMatch(albumName) : '';
 
 	const exact = results.find(
 		(t) =>
-			t.title.toLowerCase() === titleLower &&
-			t.grandparentTitle?.toLowerCase() === artistLower
+			normalizeForMatch(t.title) === titleNorm &&
+			normalizeForMatch(t.grandparentTitle ?? '') === artistNorm
 	);
 	if (exact) {
-		return { track: exact, rawCount: results.length, matchedBy: 'exact' };
+		return { track: exact, rawCount: results.length, matchedBy: 'exact', queryUsed };
 	}
 
 	const fuzzy = results.find(
-		(t) =>
-			t.title.toLowerCase() === titleLower &&
-			t.grandparentTitle?.toLowerCase().includes(artistLower)
+		(t) => {
+			const tArtist = normalizeForMatch(t.grandparentTitle ?? '');
+			return (
+				normalizeForMatch(t.title) === titleNorm &&
+				artistNorm.length > 0 &&
+				tArtist.includes(artistNorm)
+			);
+		}
 	);
 	if (fuzzy) {
-		return { track: fuzzy, rawCount: results.length, matchedBy: 'fuzzy-artist-substring' };
+		return { track: fuzzy, rawCount: results.length, matchedBy: 'fuzzy-artist-substring', queryUsed };
 	}
 
-	const titleOnly = results.find((t) => t.title.toLowerCase() === titleLower);
+	// Album-anchored match: Plex's grandparentTitle (artist) may differ from
+	// our stored artist_name when the release group is a Various Artists comp
+	// or a soundtrack. The album tag, however, comes from the same release
+	// group we already resolved, so matching on album + title is the most
+	// reliable disambiguation for that case.
+	if (albumNorm) {
+		const albumMatch = results.find(
+			(t) =>
+				normalizeForMatch(t.title) === titleNorm &&
+				normalizeForMatch(t.parentTitle ?? '') === albumNorm
+		);
+		if (albumMatch) {
+			return { track: albumMatch, rawCount: results.length, matchedBy: 'album-match', queryUsed };
+		}
+	}
+
+	const titleOnly = results.find((t) => normalizeForMatch(t.title) === titleNorm);
 	if (titleOnly) {
-		return { track: titleOnly, rawCount: results.length, matchedBy: 'title-only' };
+		return { track: titleOnly, rawCount: results.length, matchedBy: 'title-only', queryUsed };
 	}
 
 	const top = results[0];
 	return {
 		track: null,
 		rawCount: results.length,
+		queryUsed,
 		topCandidate: top
 			? { title: top.title, artist: top.grandparentTitle ?? '(unknown artist)' }
 			: undefined
@@ -707,9 +811,10 @@ export async function searchTrack(
 	artistName: string,
 	trackTitle: string,
 	sectionId: string,
-	fetchFn?: FetchFn
+	fetchFn?: FetchFn,
+	albumName?: string | null
 ): Promise<PlexTrack | null> {
-	const r = await searchTrackDiagnostic(artistName, trackTitle, sectionId, fetchFn);
+	const r = await searchTrackDiagnostic(artistName, trackTitle, sectionId, fetchFn, albumName);
 	return r.track;
 }
 
