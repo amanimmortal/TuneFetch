@@ -373,6 +373,37 @@ export function lookupAlbumByReleaseGroupMbid(
 }
 
 /**
+ * Add a specific album to an existing Lidarr artist, bypassing whatever the
+ * artist's metadata profile would normally allow through.
+ *
+ * Required when a release group is owned by an artist whose Lidarr metadata
+ * profile filters out the release type — most often "Various Artists" comps
+ * and soundtracks. Adding the artist alone leaves Lidarr unaware of the
+ * specific release group; calling this with the album/lookup result + the
+ * local artistId surfaces it explicitly.
+ *
+ * `addOptions.searchForNewAlbum` triggers an immediate indexer search so the
+ * album begins downloading without a separate AlbumSearch command.
+ */
+export function addAlbum(
+	lookupResult: LidarrAlbumLookupResult,
+	artistId: number,
+	fetchFn?: FetchFn
+): Promise<LidarrAlbum> {
+	// Pass through everything Lidarr returned from /album/lookup, but inject
+	// the local artistId (lookup results carry artist.id = 0 since the album
+	// doesn't exist locally yet) and ensure monitored + addOptions are set.
+	const body = {
+		...lookupResult,
+		artistId,
+		artist: { ...lookupResult.artist, id: artistId },
+		monitored: true,
+		addOptions: { searchForNewAlbum: true, addType: 'automatic' }
+	};
+	return request<LidarrAlbum>('POST', '/api/v1/album', body, fetchFn);
+}
+
+/**
  * Update an album record (e.g. set monitored = true for Scenario C).
  * Pass the full album object back.
  */

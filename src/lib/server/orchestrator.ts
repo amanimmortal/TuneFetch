@@ -27,7 +27,10 @@ import {
 	rootFolders,
 	getLidarrPrimaryRoot,
 	lookupAlbumByReleaseGroupMbid,
-	type LidarrTrack
+	addAlbum,
+	type LidarrTrack,
+	type LidarrAlbum,
+	type LidarrAlbumLookupResult
 } from './lidarr';
 import { startBackfill, type MirrorScope } from './mirror';
 
@@ -70,23 +73,24 @@ async function pollForTracks(
 }
 
 /**
- * Resolve a release-group MBID to the artist that *owns* it in MusicBrainz,
- * via Lidarr's metadata server.
+ * Resolve a release-group MBID via Lidarr's metadata server.
  *
  * Why this exists: a recording's credited artist (e.g. Jack Black on
  * "Steve's Lava Chicken") often differs from the release group's owning artist
  * (e.g. "Various Artists" on the "A Minecraft Movie" soundtrack). Adding the
  * recording's artist to Lidarr and waiting for the album to appear in *their*
  * discography is a dead end — Lidarr only knows about that release group as
- * part of the Various Artists discography.
+ * part of the Various Artists discography, and may even filter it out of the
+ * default metadata profile.
  *
- * Returns `null` when the lookup returns nothing or fails — caller should fall
- * back to `artist_mbid` from the list_item.
+ * Returns the full Lidarr lookup result (so the caller can both pick the
+ * owning artist's MBID and later POST the album back to Lidarr verbatim), or
+ * `null` when the lookup returns nothing or fails.
  */
-async function resolveReleaseGroupArtist(
+async function resolveReleaseGroup(
 	releaseGroupMbid: string,
 	itemId: number
-): Promise<{ artistMbid: string; artistName: string; albumTitle: string } | null> {
+): Promise<LidarrAlbumLookupResult | null> {
 	try {
 		const results = await lookupAlbumByReleaseGroupMbid(releaseGroupMbid);
 		if (!results || results.length === 0) {
@@ -104,17 +108,74 @@ async function resolveReleaseGroupArtist(
 			);
 			return null;
 		}
-		return {
-			artistMbid: match.artist.foreignArtistId,
-			artistName: match.artist.artistName,
-			albumTitle: match.title
-		};
+		return match;
 	} catch (err) {
 		console.warn(
 			`[orchestrator] item ${itemId}: Lidarr album/lookup failed for lidarr:${releaseGroupMbid} —`,
 			err
 		);
 		return null;
+	}
+}
+
+/**
+ * Ensure a specific release group exists on the given Lidarr artist. If
+ * Lidarr's metadata profile filtered the album out (common for Various Artists
+ * comps), we POST it explicitly via `addAlbum`. Returns the Lidarr album row.
+ *
+ * Caller must already have verified that `artistId` is the correct owning
+ * artist for `lookupResult` — we don't re-validate that here.
+ */
+async function ensureAlbumOnArtist(
+	itemId: number,
+	artistId: number,
+	releaseGroupMbid: string,
+	lookupResult: LidarrAlbumLookupResult | null
+): Promise<LidarrAlbum | null> {
+	// Try the cheap path first — maybe it's already there.
+	let albums = await getAlbums(artistId);
+	let existing = albums.find((a) => a.foreignAlbumId === releaseGroupMbid);
+	if (existing) {
+		console.log(
+			`[orchestrator] item ${itemId}: album ${releaseGroupMbid} already present on artist ${artistId} (Lidarr id ${existing.id})`
+		);
+		return existing;
+	}
+
+	if (!lookupResult) {
+		console.warn(
+			`[orchestrator] item ${itemId}: album ${releaseGroupMbid} not on artist ${artistId} and no lookup result to POST — giving up`
+		);
+		return null;
+	}
+
+	console.log(
+		`[orchestrator] item ${itemId}: album ${releaseGroupMbid} ("${lookupResult.title}") not on artist ${artistId} — ` +
+		`POST /api/v1/album to add it explicitly`
+	);
+	try {
+		const created = await addAlbum(lookupResult, artistId);
+		console.log(
+			`[orchestrator] item ${itemId}: addAlbum succeeded — Lidarr album id ${created.id}`
+		);
+		return created;
+	} catch (err) {
+		// One common cause: the album was created concurrently (e.g. by the
+		// artist's monitor=all metadata sync just finishing). Re-check before
+		// giving up so we don't spuriously fail.
+		albums = await getAlbums(artistId);
+		existing = albums.find((a) => a.foreignAlbumId === releaseGroupMbid);
+		if (existing) {
+			console.log(
+				`[orchestrator] item ${itemId}: addAlbum errored but album ${releaseGroupMbid} now exists (Lidarr id ${existing.id}) — using it`
+			);
+			return existing;
+		}
+		console.error(
+			`[orchestrator] item ${itemId}: addAlbum failed for release group ${releaseGroupMbid}:`,
+			err
+		);
+		throw err;
 	}
 }
 
@@ -451,20 +512,25 @@ async function scenarioB(item: ListItemRow, list: ListRow): Promise<void> {
 	// "Various Artists" — adding Jack Black will never surface the album.
 	let effectiveArtistMbid = item.artist_mbid;
 	let effectiveArtistName = item.artist_name;
+	let lookupResult: LidarrAlbumLookupResult | null = null;
 	if (item.album_mbid) {
-		const resolved = await resolveReleaseGroupArtist(item.album_mbid, item.id);
-		if (resolved && resolved.artistMbid !== item.artist_mbid) {
-			console.log(
-				`[orchestrator] item ${item.id}: scenarioB — release-group lookup overrides artist: ` +
-				`"${item.artist_name}" (MBID ${item.artist_mbid ?? '-'}) → ` +
-				`"${resolved.artistName}" (MBID ${resolved.artistMbid}) for album "${resolved.albumTitle}"`
-			);
-			effectiveArtistMbid = resolved.artistMbid;
-			effectiveArtistName = resolved.artistName;
-		} else if (resolved) {
-			console.log(
-				`[orchestrator] item ${item.id}: scenarioB — release-group lookup confirmed artist "${resolved.artistName}"`
-			);
+		lookupResult = await resolveReleaseGroup(item.album_mbid, item.id);
+		if (lookupResult) {
+			const owningMbid = lookupResult.artist.foreignArtistId;
+			const owningName = lookupResult.artist.artistName;
+			if (owningMbid !== item.artist_mbid) {
+				console.log(
+					`[orchestrator] item ${item.id}: scenarioB — release-group lookup overrides artist: ` +
+					`"${item.artist_name}" (MBID ${item.artist_mbid ?? '-'}) → ` +
+					`"${owningName}" (MBID ${owningMbid}) for album "${lookupResult.title}"`
+				);
+				effectiveArtistMbid = owningMbid;
+				effectiveArtistName = owningName;
+			} else {
+				console.log(
+					`[orchestrator] item ${item.id}: scenarioB — release-group lookup confirmed artist "${owningName}"`
+				);
+			}
 		}
 	}
 
@@ -534,38 +600,46 @@ async function scenarioB(item: ListItemRow, list: ListRow): Promise<void> {
 		}
 	}
 
-	// Find the track in Lidarr. For a freshly-added artist Lidarr fetches MB
-	// metadata asynchronously — poll until tracks appear (or we time out).
+	// Find the track in Lidarr.
 	//
-	// When album_mbid is known, prefer the *specific* release group's tracks:
-	// poll until that album appears for this artist (avoids matching on a
-	// same-titled cover from a different album), then narrow tracks to it.
+	// When album_mbid is known, force the *specific* release group onto the
+	// artist (POSTing /album if it isn't already there), then poll for its
+	// tracks. Lidarr's metadata profile commonly filters Various Artists
+	// comps and soundtracks out of the default discography, so waiting for
+	// the album to appear via the artist's monitor=all sync would time out
+	// even when the release group is well-known to MusicBrainz.
+	//
+	// Without album_mbid (legacy items) we fall back to the whole-artist track
+	// search.
 	let tracks: LidarrTrack[] = [];
 	let targetAlbumId: number | undefined;
 	if (item.album_mbid) {
-		const deadline = Date.now() + 30_000;
-		let attempts = 0;
-		while (Date.now() < deadline) {
-			attempts++;
-			const albums = await getAlbums(lidarrArtistId);
-			const match = albums.find((a) => a.foreignAlbumId === item.album_mbid);
-			if (match) {
-				targetAlbumId = match.id;
-				console.log(
-					`[orchestrator] item ${item.id}: scenarioB — release group ${item.album_mbid} ` +
-					`resolved to Lidarr album ${match.id} ("${match.title}") on attempt ${attempts}`
-				);
-				break;
+		const album = await ensureAlbumOnArtist(item.id, lidarrArtistId, item.album_mbid, lookupResult);
+		if (album) {
+			targetAlbumId = album.id;
+			// Poll for tracks on this specific album. Right after addAlbum
+			// Lidarr typically takes a few seconds to populate track rows.
+			const deadline = Date.now() + 30_000;
+			let attempts = 0;
+			while (Date.now() < deadline) {
+				attempts++;
+				tracks = (await getTracks(lidarrArtistId)).filter((t) => t.albumId === targetAlbumId);
+				if (tracks.length > 0) {
+					console.log(
+						`[orchestrator] item ${item.id}: scenarioB — album ${targetAlbumId} has ${tracks.length} track(s) (attempt ${attempts})`
+					);
+					break;
+				}
+				await new Promise((resolve) => setTimeout(resolve, 3_000));
 			}
-			if (!freshlyAdded) break; // existing artist — if the album isn't there it isn't coming
-			await new Promise((resolve) => setTimeout(resolve, 3_000));
-		}
-		if (targetAlbumId !== undefined) {
-			tracks = (await getTracks(lidarrArtistId)).filter((t) => t.albumId === targetAlbumId);
+			if (tracks.length === 0) {
+				console.warn(
+					`[orchestrator] item ${item.id}: scenarioB — album ${targetAlbumId} populated 0 tracks within timeout`
+				);
+			}
 		} else {
 			console.warn(
-				`[orchestrator] item ${item.id}: scenarioB — release group ${item.album_mbid} did not ` +
-				`appear on artist ${lidarrArtistId} within timeout; falling back to whole-artist track search`
+				`[orchestrator] item ${item.id}: scenarioB — could not ensure album ${item.album_mbid} on artist ${lidarrArtistId}; falling back to whole-artist track search`
 			);
 			tracks = freshlyAdded ? await pollForTracks(lidarrArtistId) : await getTracks(lidarrArtistId);
 		}
@@ -648,19 +722,21 @@ async function scenarioC(item: ListItemRow, list: ListRow): Promise<void> {
 	// group under (matters for Various Artists comps).
 	let effectiveArtistMbid = item.artist_mbid;
 	let effectiveArtistName = item.artist_name;
-	{
-		const resolved = await resolveReleaseGroupArtist(item.mbid, item.id);
-		if (resolved && resolved.artistMbid !== item.artist_mbid) {
+	const lookupResult = await resolveReleaseGroup(item.mbid, item.id);
+	if (lookupResult) {
+		const owningMbid = lookupResult.artist.foreignArtistId;
+		const owningName = lookupResult.artist.artistName;
+		if (owningMbid !== item.artist_mbid) {
 			console.log(
 				`[orchestrator] item ${item.id}: scenarioC — release-group lookup overrides artist: ` +
 				`"${item.artist_name}" (MBID ${item.artist_mbid ?? '-'}) → ` +
-				`"${resolved.artistName}" (MBID ${resolved.artistMbid}) for album "${resolved.albumTitle}"`
+				`"${owningName}" (MBID ${owningMbid}) for album "${lookupResult.title}"`
 			);
-			effectiveArtistMbid = resolved.artistMbid;
-			effectiveArtistName = resolved.artistName;
-		} else if (resolved) {
+			effectiveArtistMbid = owningMbid;
+			effectiveArtistName = owningName;
+		} else {
 			console.log(
-				`[orchestrator] item ${item.id}: scenarioC — release-group lookup confirmed artist "${resolved.artistName}"`
+				`[orchestrator] item ${item.id}: scenarioC — release-group lookup confirmed artist "${owningName}"`
 			);
 		}
 	}
@@ -725,43 +801,33 @@ async function scenarioC(item: ListItemRow, list: ListRow): Promise<void> {
 		}
 	}
 
-	// Find the album. For a freshly-added artist, Lidarr fetches MB metadata
-	// asynchronously — poll until albums appear (we reuse pollForTracks's logic
-	// via a small inline poll on getAlbums, since the same timing applies).
-	let albums = await getAlbums(lidarrArtistId);
-	if (freshlyAdded && albums.length === 0) {
-		const deadline = Date.now() + 30_000;
-		let attempt = 0;
-		while (albums.length === 0 && Date.now() < deadline) {
-			attempt++;
-			await new Promise((resolve) => setTimeout(resolve, 3_000));
-			albums = await getAlbums(lidarrArtistId);
-		}
-		console.log(
-			`[orchestrator] item ${item.id}: scenarioC — getAlbums poll completed after ${attempt} attempt(s) ` +
-			`(${albums.length} album(s))`
-		);
-	}
-	const target = albums.find((a) => a.foreignAlbumId === item.mbid);
-
+	// Ensure the specific release group is on the artist — for Various Artists
+	// comps and other release groups Lidarr filters out by default, this POSTs
+	// the album explicitly using the lookup result we already have.
+	const target = await ensureAlbumOnArtist(item.id, lidarrArtistId, item.mbid, lookupResult);
 	if (!target) {
 		markFailed(
 			item.id,
-			`Album MBID ${item.mbid} not found in Lidarr for artist ID ${lidarrArtistId}. ` +
-				`Lidarr may not have synced metadata yet — retry in a few minutes.`
+			`Album MBID ${item.mbid} not found in Lidarr for artist ID ${lidarrArtistId} and ` +
+				`could not be added via /album/lookup. Lidarr may be unreachable or the release ` +
+				`group is unknown to its metadata server.`
 		);
 		return;
 	}
 
-	// Monitor this album
-	console.log(`[orchestrator] item ${item.id}: scenarioC — monitoring album ${target.id} ("${target.title}")`);
-	await updateAlbum({ ...target, monitored: true });
+	// Monitor this album (idempotent — addAlbum already sets monitored=true,
+	// but covers the case where the album was already present and unmonitored).
+	if (!target.monitored) {
+		console.log(`[orchestrator] item ${item.id}: scenarioC — monitoring album ${target.id} ("${target.title}")`);
+		await updateAlbum({ ...target, monitored: true });
+	}
 
 	// Narrow: for a freshly-added artist, unmonitor every other album so we
 	// don't pull the whole discography. Best-effort.
 	if (freshlyAdded) {
 		try {
-			const toUnmonitor = albums.filter((a) => a.id !== target.id && a.monitored);
+			const allAlbums = await getAlbums(lidarrArtistId);
+			const toUnmonitor = allAlbums.filter((a) => a.id !== target.id && a.monitored);
 			if (toUnmonitor.length > 0) {
 				console.log(
 					`[orchestrator] item ${item.id}: scenarioC — narrowing artist ${lidarrArtistId}: ` +
