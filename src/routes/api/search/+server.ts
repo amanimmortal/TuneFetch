@@ -94,7 +94,8 @@ export const GET: RequestHandler = async ({ url }) => {
 				return RG_TITLE_PENALTY_REGEX.test(title) ? 80 : 0;
 			}
 
-			// Layer 1: filter by canonical tier when strict filters are on
+			// Layer 1: filter by canonical tier when strict filters are on.
+			// Tiers: 1=Album, 2=EP, 3=Single, 4=Compilation, 5=anything remaining.
 			const decorated = arr
 				.map((rec) => ({
 					rec,
@@ -106,13 +107,19 @@ export const GET: RequestHandler = async ({ url }) => {
 					if (!canonical) return false;
 					if (trackFilters.primaryTypes.length > 0) {
 						const allowAlbum = trackFilters.primaryTypes.includes('Album');
-						const allowEpSing =
-							trackFilters.primaryTypes.includes('EP') || trackFilters.primaryTypes.includes('Single');
+						const allowEP = trackFilters.primaryTypes.includes('EP');
+						const allowSingle = trackFilters.primaryTypes.includes('Single');
 						if (canonical.tier === 1 && !allowAlbum) return false;
-						if (canonical.tier === 2 && !allowEpSing) return false;
-						if (canonical.tier >= 3) return false;
+						if (canonical.tier === 2 && !allowEP) return false;
+						if (canonical.tier === 3 && !allowSingle) return false;
+						if (canonical.tier >= 4) return false;
 					}
-					if (trackFilters.excludeSecondaryTypes && canonical.tier !== 1 && canonical.tier !== 2) {
+					if (
+						trackFilters.excludeSecondaryTypes &&
+						canonical.tier !== 1 &&
+						canonical.tier !== 2 &&
+						canonical.tier !== 3
+					) {
 						return false;
 					}
 					return true;
@@ -120,8 +127,8 @@ export const GET: RequestHandler = async ({ url }) => {
 
 			// Layer 2+3: include RG title penalty; prefer latest album as final tiebreak
 			decorated.sort((a, b) => {
-				const tA = a.canonical?.tier ?? 5;
-				const tB = b.canonical?.tier ?? 5;
+				const tA = a.canonical?.tier ?? 6;
+				const tB = b.canonical?.tier ?? 6;
 				if (tA !== tB) return tA - tB;
 				const pA = a.penalty + rgTitlePenalty(a.canonical?.title);
 				const pB = b.penalty + rgTitlePenalty(b.canonical?.title);

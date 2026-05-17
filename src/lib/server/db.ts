@@ -162,7 +162,7 @@ export function getDb(): Database.Database {
 
   // Bump this constant whenever canonical album resolver logic changes.
   // On mismatch the entire cache is cleared so stale canonical mappings don't persist.
-  const CANONICAL_RESOLVER_VERSION = 1;
+  const CANONICAL_RESOLVER_VERSION = 2;
   {
     const currentVersion = db.pragma('user_version', { simple: true }) as number;
     if (currentVersion < CANONICAL_RESOLVER_VERSION) {

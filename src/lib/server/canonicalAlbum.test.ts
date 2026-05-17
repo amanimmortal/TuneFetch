@@ -52,7 +52,7 @@ describe('resolveCanonicalAlbum', () => {
 		expect(result?.releaseGroupMbid).toBe('rg-album');
 	});
 
-	it('falls back to Compilation (tier 3) when only Live and Compilation exist', () => {
+	it('falls back to Compilation (tier 4) when only Live and Compilation exist', () => {
 		const result = resolveCanonicalAlbum(
 			makeRec({
 				releases: [
@@ -61,7 +61,7 @@ describe('resolveCanonicalAlbum', () => {
 				]
 			})
 		);
-		expect(result?.tier).toBe(3);
+		expect(result?.tier).toBe(4);
 		expect(result?.releaseGroupMbid).toBe('rg-comp');
 	});
 
@@ -72,21 +72,34 @@ describe('resolveCanonicalAlbum', () => {
 		expect(result?.tier).toBe(2);
 	});
 
-	it('returns tier 2 for a Single release-group', () => {
+	it('returns tier 3 for a Single release-group', () => {
 		const result = resolveCanonicalAlbum(
 			makeRec({ releases: [release(rg('rg-single', 'Single', [], '1966-01-01'))] })
 		);
-		expect(result?.tier).toBe(2);
+		expect(result?.tier).toBe(3);
 	});
 
-	it('does not drop Soundtrack (not noise) — falls to tier 4 when only option', () => {
+	it('prefers EP (tier 2) over Single (tier 3) when both exist', () => {
+		const result = resolveCanonicalAlbum(
+			makeRec({
+				releases: [
+					release(rg('rg-single', 'Single', [], '1965-01-01')),
+					release(rg('rg-ep', 'EP', [], '1966-01-01'))
+				]
+			})
+		);
+		expect(result?.tier).toBe(2);
+		expect(result?.releaseGroupMbid).toBe('rg-ep');
+	});
+
+	it('does not drop Soundtrack (not noise) — falls to tier 5 when only option', () => {
 		// Soundtrack is not in BAD_SECONDARY, so it survives the clean filter.
-		// But primary=Album with secondary=['Soundtrack'] fails Tier 1 (has secondary),
-		// Tier 2 (primary is Album), and Tier 3 (secondary is not Compilation).
+		// Album+Soundtrack fails Tiers 1–4 (has secondary types, isn't EP/Single,
+		// and secondary isn't purely Compilation), so it lands in Tier 5.
 		const result = resolveCanonicalAlbum(
 			makeRec({ releases: [release(rg('rg-ost', 'Album', ['Soundtrack'], '1980-01-01'))] })
 		);
-		expect(result?.tier).toBe(4);
+		expect(result?.tier).toBe(5);
 		expect(result?.releaseGroupMbid).toBe('rg-ost');
 	});
 

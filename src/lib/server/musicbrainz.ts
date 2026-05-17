@@ -144,7 +144,7 @@ export interface ReleaseGroupFilters {
 }
 
 export const DEFAULT_RG_FILTERS: ReleaseGroupFilters = {
-	primaryTypes: ['Album', 'EP'],
+	primaryTypes: ['Album', 'EP', 'Single'],
 	excludeSecondaryTypes: true,
 	officialOnly: true
 };

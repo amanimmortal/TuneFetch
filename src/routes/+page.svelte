@@ -34,13 +34,13 @@
 	let advancedOpen = false;
 	let primaryAlbum = true;
 	let primaryEP = true;
-	let primarySingle = false;
+	let primarySingle = true;
 	let primaryOther = false;
 	let studioOnly = true;
 	let officialOnly = true;
 
 	$: filtersDiffer =
-		!primaryAlbum || !primaryEP || primarySingle || primaryOther || !studioOnly || !officialOnly;
+		!primaryAlbum || !primaryEP || !primarySingle || primaryOther || !studioOnly || !officialOnly;
 
 	// Bust the per-artist album cache whenever filters change
 	$: {
@@ -99,7 +99,7 @@
 			if (artistField.trim()) params.set('artist', artistField.trim());
 			if (albumField.trim()) params.set('album', albumField.trim());
 			if (trackField.trim()) params.set('track', trackField.trim());
-			if (type === 'album') appendRgFilterParams(params);
+			if (type === 'album' || type === 'track') appendRgFilterParams(params);
 
 			const res = await fetch(`/api/search?${params.toString()}`);
 			const json = await res.json();
@@ -269,8 +269,8 @@
       {/if}
     </div>
 
-    <!-- Advanced filters (admin only, album + artist types) -->
-    {#if isAdmin && (type === 'album' || type === 'artist')}
+    <!-- Advanced filters (admin only) -->
+    {#if isAdmin}
       <div class="border-t border-slate-800 pt-3">
         <button
           type="button"

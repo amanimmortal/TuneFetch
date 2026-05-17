@@ -7,11 +7,13 @@ const BAD_SECONDARY = NOISE_SECONDARY_TYPES_JSON;
 const TITLE_PENALTY_REGEX =
 	/\b(live|remaster(ed)?|radio edit|instrumental|acoustic|karaoke|demo|mono|alternate)\b/i;
 
+export type CanonicalTier = 1 | 2 | 3 | 4 | 5;
+
 export interface CanonicalAlbum {
 	releaseGroupMbid: string;
 	title: string;
 	year: string | null;
-	tier: 1 | 2 | 3 | 4;
+	tier: CanonicalTier;
 }
 
 export function resolveCanonicalAlbum(rec: MBRecording): CanonicalAlbum | null {
@@ -41,28 +43,30 @@ export function resolveCanonicalAlbum(rec: MBRecording): CanonicalAlbum | null {
 	);
 	if (tier1.length) return toCanonical(earliest(tier1), 1);
 
-	// Tier 2: EP or Single
-	const tier2 = clean.filter(
-		(g) => g['primary-type'] === 'EP' || g['primary-type'] === 'Single'
-	);
+	// Tier 2: EP
+	const tier2 = clean.filter((g) => g['primary-type'] === 'EP');
 	if (tier2.length) return toCanonical(earliest(tier2), 2);
 
-	// Tier 3: compilation-only album (best-of fallback)
-	const tier3 = clean.filter(
+	// Tier 3: Single
+	const tier3 = clean.filter((g) => g['primary-type'] === 'Single');
+	if (tier3.length) return toCanonical(earliest(tier3), 3);
+
+	// Tier 4: compilation-only album (best-of fallback)
+	const tier4 = clean.filter(
 		(g) =>
 			g['primary-type'] === 'Album' &&
 			(g['secondary-types'] ?? []).length > 0 &&
 			(g['secondary-types'] ?? []).every((s) => s === 'Compilation')
 	);
-	if (tier3.length) return toCanonical(earliest(tier3), 3);
+	if (tier4.length) return toCanonical(earliest(tier4), 4);
 
-	// Tier 4: anything remaining
-	if (clean.length) return toCanonical(earliest(clean), 4);
-	if (unique.length) return toCanonical(earliest(unique), 4);
+	// Tier 5: anything remaining
+	if (clean.length) return toCanonical(earliest(clean), 5);
+	if (unique.length) return toCanonical(earliest(unique), 5);
 	return null;
 }
 
-function toCanonical(g: MBReleaseGroupNested, tier: 1 | 2 | 3 | 4): CanonicalAlbum {
+function toCanonical(g: MBReleaseGroupNested, tier: CanonicalTier): CanonicalAlbum {
 	return {
 		releaseGroupMbid: g.id,
 		title: g.title,
@@ -109,7 +113,7 @@ export function resolveCanonicalAlbumCached(rec: MBRecording): CanonicalAlbum | 
 			releaseGroupMbid: cached.release_group_mbid,
 			title: cached.release_group_title,
 			year: cached.year,
-			tier: cached.tier as 1 | 2 | 3 | 4
+			tier: cached.tier as CanonicalTier
 		};
 	}
 
