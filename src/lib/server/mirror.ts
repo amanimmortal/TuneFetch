@@ -1185,7 +1185,10 @@ export async function verifyMirrorFiles(): Promise<VerifyReport> {
     for (const file of trackFiles) {
       if (knownTrackFileIds.has(file.id) || knownSourcePaths.has(file.path)) continue;
       try {
-        await mirrorTrackFile(file.path, c.list_item_id, c.owner_root, c.target_root, {
+        // Owner root is always the Lidarr primary root in the single-root
+        // architecture — the SELECT above only joins target_root, so we use
+        // the primaryRoot variable resolved at the top of this pass.
+        await mirrorTrackFile(file.path, c.list_item_id, primaryRoot, c.target_root, {
           trackFileId: file.id,
           trackId: trackMap.get(file.id)
         });
@@ -1204,7 +1207,7 @@ export async function verifyMirrorFiles(): Promise<VerifyReport> {
         recordPendingDiscovery(
           c.list_item_id,
           file.path,
-          buildMirrorPath(file.path, c.owner_root, c.target_root),
+          buildMirrorPath(file.path, primaryRoot, c.target_root),
           file.id,
           trackMap.get(file.id),
           msg

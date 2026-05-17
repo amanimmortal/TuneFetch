@@ -14,7 +14,9 @@
       "Bash(xargs grep -l \"resolveTrackForListItem\\\\|normalizeTitle\")",
       "Bash(Select-String -Pattern \"upsertOwnership\" -Path \"D:\\\\GitHub\\\\TuneFetch\\\\src\\\\lib\\\\server\\\\orchestrator.ts\" -AllMatches)",
       "Bash(Select-Object LineNumber, Line)",
-      "Bash(git stash *)"
+      "Bash(git stash *)",
+      "Bash(npx svelte-check *)",
+      "Bash(node -e \"const s = require\\('fs'\\).readFileSync\\('D:/GitHub/TuneFetch/src/routes/+page.server.ts','utf8'\\); console.log\\(JSON.stringify\\(s.slice\\(800,1900\\)\\)\\);\")"
     ]
   }
 }

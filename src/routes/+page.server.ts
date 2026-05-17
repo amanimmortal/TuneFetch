@@ -27,8 +27,15 @@ export const actions: Actions = {
 		const artistName = ((data.get('artistName') as string | null) ?? '').trim();
 		const albumName  = ((data.get('albumName')  as string | null) ?? '').trim() || null;
 		// Artist MBID for track/album items — used by orchestrator to auto-add
-		// the artist to Lidarr (monitor=none) when not already present.
+		// the artist to Lidarr when not already present.
 		const artistMbid = ((data.get('artistMbid') as string | null) ?? '').trim() || null;
+		// Release-group MBID. For track items this is the canonical release
+		// group (from the canonical-album resolver) and the orchestrator uses
+		// it to look up the album in Lidarr via `lidarr:<rg_mbid>` — which
+		// resolves to the correct owning artist even when the recording's
+		// credited artist differs (Various Artists comps, soundtracks).
+		// For album items this equals mbid; null for artist items.
+		const albumMbid = ((data.get('albumMbid') as string | null) ?? '').trim() || null;
 
 		if (!listId || !mbid || !type || !title || !artistName) {
 			return fail(400, { error: 'Missing required fields for adding to list.' });
@@ -42,10 +49,10 @@ export const actions: Actions = {
 		try {
 			const result = getDb()
 				.prepare(
-					`INSERT INTO list_items (list_id, mbid, type, title, artist_name, album_name, artist_mbid)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`
+					`INSERT INTO list_items (list_id, mbid, type, title, artist_name, album_name, artist_mbid, album_mbid)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 				)
-				.run(listId, mbid, type, title, artistName, albumName, artistMbid);
+				.run(listId, mbid, type, title, artistName, albumName, artistMbid, albumMbid);
 			newItemId = result.lastInsertRowid as number;
 		} catch {
 			return fail(500, { error: 'Database error — could not add item.' });

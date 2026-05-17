@@ -326,6 +326,53 @@ export function getAlbums(artistId?: number, fetchFn?: FetchFn): Promise<LidarrA
 }
 
 /**
+ * Shape returned by `GET /api/v1/album/lookup`.
+ *
+ * Lidarr's lookup endpoint queries its metadata server directly, so it returns
+ * full album metadata (including the *owning* artist) even for release groups
+ * that wouldn't appear under any currently-monitored artist's discography.
+ * That makes it the only reliable way to resolve compilations / soundtracks
+ * (e.g. a Jack Black recording on a "Various Artists" release group).
+ *
+ * The shape is loosely typed because Lidarr's response carries many UI fields
+ * we don't need; we only care about the album-identification + embedded
+ * artist's foreignArtistId.
+ */
+export interface LidarrAlbumLookupResult {
+	/** MusicBrainz release-group MBID. */
+	foreignAlbumId: string;
+	title: string;
+	/** Embedded artist record — includes the foreignArtistId of the *owning* artist. */
+	artist: {
+		foreignArtistId: string;
+		artistName: string;
+		[key: string]: unknown;
+	};
+	[key: string]: unknown;
+}
+
+/**
+ * Look up an album by MusicBrainz release-group MBID via Lidarr's metadata
+ * server. Uses Lidarr's `lidarr:<mbid>` query syntax. Returns whatever
+ * candidates Lidarr returns (typically one for an exact MBID match).
+ *
+ * Use this when a track or album's recording-credited artist differs from the
+ * release group's owning artist — i.e. soundtracks and compilations.
+ */
+export function lookupAlbumByReleaseGroupMbid(
+	releaseGroupMbid: string,
+	fetchFn?: FetchFn
+): Promise<LidarrAlbumLookupResult[]> {
+	const term = encodeURIComponent(`lidarr:${releaseGroupMbid}`);
+	return request<LidarrAlbumLookupResult[]>(
+		'GET',
+		`/api/v1/album/lookup?term=${term}`,
+		undefined,
+		fetchFn
+	);
+}
+
+/**
  * Update an album record (e.g. set monitored = true for Scenario C).
  * Pass the full album object back.
  */

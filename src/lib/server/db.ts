@@ -33,6 +33,13 @@ export function getDb(): Database.Database {
   if (!listItemCols.includes('artist_mbid')) {
     db.exec('ALTER TABLE list_items ADD COLUMN artist_mbid TEXT');
   }
+  // album_mbid stores the canonical MusicBrainz release-group MBID for track
+  // items. The orchestrator uses it to look up the album in Lidarr by release
+  // group, which resolves to the correct *owning* artist even when the
+  // recording's credited artist differs (Various Artists comps, soundtracks).
+  if (!listItemCols.includes('album_mbid')) {
+    db.exec('ALTER TABLE list_items ADD COLUMN album_mbid TEXT');
+  }
 
   const listCols = (db.pragma('table_info(lists)') as Array<{ name: string }>)
     .map((c) => c.name);

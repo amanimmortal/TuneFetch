@@ -398,6 +398,7 @@
                 <input type="hidden" name="artistName" value={r.artist} />
                 <input type="hidden" name="albumName" value={r.album || ''} />
                 <input type="hidden" name="artistMbid" value={r.artistMbid || ''} />
+                <input type="hidden" name="albumMbid" value={r.type === 'album' ? r.mbid : (r.albumMbid || '')} />
                 <select name="listId" class="input flex-1 px-2 py-1 text-sm h-9 min-w-0" required>
                   <option value="" disabled selected>Select list…</option>
                   {#each data.lists as list}
@@ -418,6 +419,7 @@
                     <input type="hidden" name="artistName" value={r.artist} />
                     <input type="hidden" name="albumName" value={r.album || ''} />
                     <input type="hidden" name="artistMbid" value={r.artistMbid || ''} />
+                    <input type="hidden" name="albumMbid" value={r.type === 'album' ? r.mbid : (r.albumMbid || '')} />
                     <input type="hidden" name="listId" value={list.id} />
                     <button
                       type="submit"
@@ -472,6 +474,7 @@
                               <input type="hidden" name="artistName" value={r.title} />
                               <input type="hidden" name="albumName" value={album.title} />
                               <input type="hidden" name="artistMbid" value={r.mbid} />
+                              <input type="hidden" name="albumMbid" value={album.mbid} />
                               <select name="listId" class="input px-2 py-1 text-sm h-11" required>
                                 <option value="" disabled selected>List…</option>
                                 {#each data.lists as list}
@@ -490,6 +493,7 @@
                                 <input type="hidden" name="artistName" value={r.title} />
                                 <input type="hidden" name="albumName" value={album.title} />
                                 <input type="hidden" name="artistMbid" value={r.mbid} />
+                                <input type="hidden" name="albumMbid" value={album.mbid} />
                                 <input type="hidden" name="listId" value={list.id} />
                                 <button
                                   type="submit"
@@ -543,6 +547,7 @@
                                     <input type="hidden" name="artistName" value={track.artist} />
                                     <input type="hidden" name="albumName" value={album.title} />
                                     <input type="hidden" name="artistMbid" value={track.artistMbid || r.mbid} />
+                                    <input type="hidden" name="albumMbid" value={track.albumMbid || album.mbid} />
                                     <select name="listId" class="input px-2 py-1 text-sm h-11" required>
                                       <option value="" disabled selected>List…</option>
                                       {#each data.lists as list}
@@ -562,6 +567,7 @@
                                         <input type="hidden" name="artistName" value={track.artist} />
                                         <input type="hidden" name="albumName" value={album.title} />
                                         <input type="hidden" name="artistMbid" value={track.artistMbid || r.mbid} />
+                                        <input type="hidden" name="albumMbid" value={track.albumMbid || album.mbid} />
                                         <input type="hidden" name="listId" value={list.id} />
                                         <button
                                           type="submit"
