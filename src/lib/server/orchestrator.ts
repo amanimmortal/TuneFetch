@@ -843,32 +843,44 @@ async function scenarioB(item: ListItemRow, list: ListRow): Promise<void> {
 		}
 	}
 
+	const ids = { lidarrArtistId, lidarrAlbumId: target.albumId, lidarrTrackId: target.id };
+
+	db.prepare(
+		`UPDATE list_items SET lidarr_artist_id = ?, lidarr_album_id = ?, lidarr_track_id = ? WHERE id = ?`
+	).run(lidarrArtistId, target.albumId, target.id, item.id);
+
+	// If Lidarr already has a file for this track, skip the search entirely.
+	if (target.trackFileId) {
+		console.log(
+			`[orchestrator] item ${item.id}: scenarioB — track already has file (trackFileId=${target.trackFileId}), skipping search`
+		);
+		if (list.root_folder_path !== primaryRoot) {
+			markMirrorPending(item.id);
+			const scope: MirrorScope = { type: 'track', lidarrAlbumId: target.albumId, lidarrTrackId: target.id };
+			startBackfill(lidarrArtistId, item.id, primaryRoot, list.root_folder_path, scope).catch(
+				(err) => console.error(`[orchestrator] backfill failed for item ${item.id}:`, err)
+			);
+			return;
+		}
+		markSynced(item.id, ids);
+		return;
+	}
+
 	// Trigger album search and inspect the outcome — if Lidarr didn't grab a
 	// release, surface that on the list_item so the user knows manual
 	// intervention (indexers, profile, wait) may be needed.
 	console.log(`[orchestrator] item ${item.id}: scenarioB — triggering AlbumSearch on album ${target.albumId}`);
 	const outcome = await runAndReportAlbumSearch(item.id, target.albumId);
 
-	const ids = { lidarrArtistId, lidarrAlbumId: target.albumId, lidarrTrackId: target.id };
-
 	if (outcome.grabbed === 0) {
-		// Nothing was snatched. Persist the Lidarr ids (so retry/backfill can use
-		// them later) and mark awaiting_release. Skip mirror backfill — there's
-		// nothing on disk yet, and the webhook will handle copying once Lidarr
-		// eventually grabs a release.
-		db.prepare(
-			`UPDATE list_items SET lidarr_artist_id = ?, lidarr_album_id = ?, lidarr_track_id = ? WHERE id = ?`
-		).run(lidarrArtistId, target.albumId, target.id, item.id);
+		// Nothing was snatched — mark awaiting_release. Skip mirror backfill;
+		// the webhook will handle copying once Lidarr eventually grabs a release.
 		markAwaitingRelease(item.id, outcome.summary, ids);
 		return;
 	}
 
 	// Cross-library check
 	if (list.root_folder_path !== primaryRoot) {
-		db.prepare(
-			`UPDATE list_items SET lidarr_artist_id = ?, lidarr_album_id = ?, lidarr_track_id = ? WHERE id = ?`
-		).run(lidarrArtistId, target.albumId, target.id, item.id);
-
 		markMirrorPending(item.id);
 		const scope: MirrorScope = { type: 'track', lidarrAlbumId: target.albumId, lidarrTrackId: target.id };
 		startBackfill(lidarrArtistId, item.id, primaryRoot, list.root_folder_path, scope).catch(
@@ -1015,26 +1027,43 @@ async function scenarioC(item: ListItemRow, list: ListRow): Promise<void> {
 		}
 	}
 
+	const ids = { lidarrArtistId, lidarrAlbumId: target.id };
+
+	db.prepare(
+		`UPDATE list_items SET lidarr_artist_id = ?, lidarr_album_id = ? WHERE id = ?`
+	).run(lidarrArtistId, target.id, item.id);
+
+	// If Lidarr already has files for this album, skip the search.
+	const trackFileCount = (target as Record<string, unknown>).statistics != null
+		? ((target as Record<string, unknown>).statistics as Record<string, unknown>)?.trackFileCount as number | undefined
+		: undefined;
+	if (trackFileCount != null && trackFileCount > 0) {
+		console.log(
+			`[orchestrator] item ${item.id}: scenarioC — album already has ${trackFileCount} file(s), skipping search`
+		);
+		if (list.root_folder_path !== primaryRoot) {
+			markMirrorPending(item.id);
+			const scope: MirrorScope = { type: 'album', lidarrAlbumId: target.id };
+			startBackfill(lidarrArtistId, item.id, primaryRoot, list.root_folder_path, scope).catch(
+				(err) => console.error(`[orchestrator] backfill failed for item ${item.id}:`, err)
+			);
+			return;
+		}
+		markSynced(item.id, ids);
+		return;
+	}
+
 	// Trigger album search and inspect the outcome.
 	console.log(`[orchestrator] item ${item.id}: scenarioC — triggering AlbumSearch on album ${target.id}`);
 	const outcome = await runAndReportAlbumSearch(item.id, target.id);
 
-	const ids = { lidarrArtistId, lidarrAlbumId: target.id };
-
 	if (outcome.grabbed === 0) {
-		db.prepare(
-			`UPDATE list_items SET lidarr_artist_id = ?, lidarr_album_id = ? WHERE id = ?`
-		).run(lidarrArtistId, target.id, item.id);
 		markAwaitingRelease(item.id, outcome.summary, ids);
 		return;
 	}
 
 	// Cross-library check
 	if (list.root_folder_path !== primaryRoot) {
-		db.prepare(
-			`UPDATE list_items SET lidarr_artist_id = ?, lidarr_album_id = ? WHERE id = ?`
-		).run(lidarrArtistId, target.id, item.id);
-
 		markMirrorPending(item.id);
 		const scope: MirrorScope = { type: 'album', lidarrAlbumId: target.id };
 		startBackfill(lidarrArtistId, item.id, primaryRoot, list.root_folder_path, scope).catch(
