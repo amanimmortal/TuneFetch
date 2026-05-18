@@ -153,6 +153,54 @@ export function getDb(): Database.Database {
     }
   }
 
+  // Migration: add 'awaiting_release' to sync_status CHECK constraint.
+  // SQLite cannot ALTER a CHECK constraint, so recreate the table.
+  {
+    const tableInfo = db
+      .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='list_items'")
+      .get() as { sql: string } | undefined;
+    if (tableInfo && !tableInfo.sql.includes('awaiting_release')) {
+      db.exec(`
+        BEGIN;
+        CREATE TABLE list_items_new (
+          id               INTEGER PRIMARY KEY,
+          list_id          INTEGER NOT NULL REFERENCES lists(id) ON DELETE CASCADE,
+          mbid             TEXT NOT NULL,
+          type             TEXT NOT NULL CHECK(type IN ('track', 'album', 'artist')),
+          title            TEXT NOT NULL,
+          artist_name      TEXT NOT NULL,
+          album_name       TEXT,
+          artist_mbid      TEXT,
+          album_mbid       TEXT,
+          lidarr_artist_id INTEGER,
+          lidarr_album_id  INTEGER,
+          lidarr_track_id  INTEGER,
+          sync_status      TEXT NOT NULL DEFAULT 'pending'
+                           CHECK(sync_status IN ('pending','synced','failed','mirror_pending','mirror_active','mirror_broken','awaiting_release')),
+          sync_error       TEXT,
+          created_at       DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO list_items_new
+          (id, list_id, mbid, type, title, artist_name, album_name,
+           artist_mbid, album_mbid, lidarr_artist_id, lidarr_album_id,
+           lidarr_track_id, sync_status, sync_error, created_at)
+        SELECT id, list_id, mbid, type, title, artist_name, album_name,
+               artist_mbid, album_mbid, lidarr_artist_id, lidarr_album_id,
+               lidarr_track_id, sync_status, sync_error, created_at
+          FROM list_items;
+        DROP TABLE list_items;
+        ALTER TABLE list_items_new RENAME TO list_items;
+        COMMIT;
+      `);
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_list_items_list ON list_items(list_id);
+        CREATE INDEX IF NOT EXISTS idx_list_items_mbid ON list_items(mbid);
+        CREATE INDEX IF NOT EXISTS idx_list_items_artist_mbid ON list_items(artist_mbid);
+      `);
+      console.log('[migration] list_items: added awaiting_release to sync_status CHECK constraint.');
+    }
+  }
+
   // Drop legacy artist_ownership table from multi-root architecture.
   try {
     db.exec('DROP TABLE IF EXISTS artist_ownership');

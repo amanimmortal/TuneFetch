@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS list_items (
   lidarr_album_id  INTEGER,
   lidarr_track_id  INTEGER,
   sync_status      TEXT NOT NULL DEFAULT 'pending'
-                   CHECK(sync_status IN ('pending','synced','failed','mirror_pending','mirror_active','mirror_broken')),
+                   CHECK(sync_status IN ('pending','synced','failed','mirror_pending','mirror_active','mirror_broken','awaiting_release')),
   sync_error       TEXT,
   created_at       DATETIME DEFAULT CURRENT_TIMESTAMP
 );
