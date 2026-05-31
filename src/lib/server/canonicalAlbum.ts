@@ -91,8 +91,8 @@ interface CacheRow {
 }
 
 // Prepared statements initialised once on first call to avoid per-invocation prepare overhead.
-let _stmtGet: ReturnType<ReturnType<typeof getDb>['prepare']> | null = null;
-let _stmtUpsert: ReturnType<ReturnType<typeof getDb>['prepare']> | null = null;
+let _stmtGet: any = null;
+let _stmtUpsert: any = null;
 
 // Cache-aware wrapper: looks up recording_mbid in SQLite, resolves on miss, writes through.
 export function resolveCanonicalAlbumCached(rec: MBRecording): CanonicalAlbum | null {

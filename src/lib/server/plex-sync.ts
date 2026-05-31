@@ -17,6 +17,8 @@
 import { getDb } from './db';
 import {
 	searchTrackDiagnostic,
+	searchAlbumDiagnostic,
+	getAlbumTracks,
 	createPlaylist,
 	addToPlaylist,
 	getPlaylistItems,
@@ -189,14 +191,16 @@ async function runPlexSync(
 	// Load locally-tracked synced items for this playlist.
 	const trackedRows = db
 		.prepare(
-			`SELECT id, list_item_id, plex_rating_key
-			   FROM plex_playlist_items
-			  WHERE plex_playlist_id_fk = ?`
+			`SELECT ppi.id, ppi.list_item_id, ppi.plex_rating_key, li.type AS list_item_type
+			   FROM plex_playlist_items ppi
+			   JOIN list_items li ON li.id = ppi.list_item_id
+			  WHERE ppi.plex_playlist_id_fk = ?`
 		)
 		.all(row.id) as Array<{
 			id: number;
 			list_item_id: number;
 			plex_rating_key: string;
+			list_item_type: 'track' | 'album' | 'artist';
 		}>;
 
 	// Reconcile against the Plex playlist's actual contents. If a user has
@@ -226,14 +230,37 @@ async function runPlexSync(
 			const liveRatingKeys = new Set(livePlexItems.map((i) => String(i.ratingKey)));
 			const deleteStmt = db.prepare('DELETE FROM plex_playlist_items WHERE id = ?');
 			for (const tracked of trackedRows) {
-				if (!liveRatingKeys.has(String(tracked.plex_rating_key))) {
-					deleteStmt.run(tracked.id);
-					prunedStale++;
-					console.log(
-						`[plex-sync] Pruned stale plex_playlist_items row ${tracked.id} ` +
-						`(list_item ${tracked.list_item_id}, ratingKey ${tracked.plex_rating_key} ` +
-						`no longer in Plex playlist ${row.plex_playlist_id})`
-					);
+				if (tracked.list_item_type === 'track') {
+					if (!liveRatingKeys.has(String(tracked.plex_rating_key))) {
+						deleteStmt.run(tracked.id);
+						prunedStale++;
+						console.log(
+							`[plex-sync] Pruned stale plex_playlist_items row ${tracked.id} ` +
+							`(list_item ${tracked.list_item_id}, ratingKey ${tracked.plex_rating_key} ` +
+							`no longer in Plex playlist ${row.plex_playlist_id})`
+						);
+					}
+				} else if (tracked.list_item_type === 'album') {
+					try {
+						const albumTracks = await getAlbumTracks(plexToken, tracked.plex_rating_key);
+						const albumTrackKeys = albumTracks.map((t) => String(t.ratingKey));
+						// If NONE of the album's tracks are in the Plex playlist, consider the album removed.
+						const hasAnyTrack = albumTrackKeys.some((key) => liveRatingKeys.has(key));
+						if (!hasAnyTrack) {
+							deleteStmt.run(tracked.id);
+							prunedStale++;
+							console.log(
+								`[plex-sync] Pruned stale plex_playlist_items row ${tracked.id} ` +
+								`(album list_item ${tracked.list_item_id}, ratingKey ${tracked.plex_rating_key} ` +
+								`has no remaining tracks in Plex playlist ${row.plex_playlist_id})`
+							);
+						}
+					} catch (err) {
+						console.warn(
+							`[plex-sync] Could not check album tracks for ratingKey ${tracked.plex_rating_key} (non-fatal):`,
+							err
+						);
+					}
 				}
 			}
 		}
@@ -282,51 +309,90 @@ async function runPlexSync(
 	}> = [];
 
 	for (const item of newItems) {
-		// Only sync track-type items or items where we have artist+title
-		// Album and artist types don't have individual tracks to add
 		if (item.type === 'artist') {
 			// Skip artist-type items -- playlists contain tracks, not artists
 			continue;
 		}
 
 		try {
-			const search = await searchTrackDiagnostic(
-				item.artist_name,
-				item.title,
-				librarySectionId,
-				undefined,
-				item.album_name
-			);
-			if (search.track) {
-				if (search.matchedBy && search.matchedBy !== 'exact') {
+			let ratingKey: string | null = null;
+			let matchNote = '';
+
+			if (item.type === 'album') {
+				const search = await searchAlbumDiagnostic(
+					item.artist_name,
+					item.title,
+					librarySectionId
+				);
+				if (search.album) {
+					ratingKey = search.album.ratingKey;
+					if (search.matchedBy && search.matchedBy !== 'exact') {
+						matchNote = `Matched album "${item.artist_name} - ${item.title}" via ${search.matchedBy} (Plex: "${search.album.parentTitle ?? '?'} - ${search.album.title}")`;
+					}
+				} else {
+					const detail =
+						search.rawCount === 0
+							? `no Plex search results for album`
+							: search.topCandidate
+							? `album search had hits; top candidate "${search.topCandidate.artist} - ${search.topCandidate.title}" did not match expected artist/title`
+							: `album search had hits but no usable candidate metadata`;
 					console.log(
-						`[plex-sync] Matched "${item.artist_name} - ${item.title}" ` +
-						`via ${search.matchedBy} (Plex: "${search.track.grandparentTitle ?? '?'} - ${search.track.title}" ` +
-						`on album "${search.track.parentTitle ?? '?'}", ratingKey ${search.track.ratingKey}` +
-						`${search.queryUsed && search.queryUsed !== item.title ? `, queryUsed="${search.queryUsed}"` : ''})`
+						`[plex-sync] No Plex match for album list_item ${item.id} ` +
+						`"${item.artist_name} - ${item.title}" (sectionId=${librarySectionId}): ${detail}`
+					);
+					result.notFound++;
+					result.unmatched.push({
+						listItemId: item.id,
+						artistName: item.artist_name,
+						title: item.title
+					});
+				}
+			} else {
+				// Track type
+				const search = await searchTrackDiagnostic(
+					item.artist_name,
+					item.title,
+					librarySectionId,
+					undefined,
+					item.album_name
+				);
+				if (search.track) {
+					ratingKey = search.track.ratingKey;
+					if (search.matchedBy && search.matchedBy !== 'exact') {
+						matchNote = `Matched track "${item.artist_name} - ${item.title}" via ${search.matchedBy} (Plex: "${search.track.grandparentTitle ?? '?'} - ${search.track.title}" on album "${search.track.parentTitle ?? '?'}")`;
+					}
+				} else {
+					const queryNote = search.queryUsed && search.queryUsed !== item.title ? ` (last query="${search.queryUsed}")` : '';
+					const detail =
+						search.rawCount === 0
+							? `no Plex search results across normalization variants${queryNote} — title may be indexed differently or library not yet scanned`
+							: search.topCandidate
+							? `${search.rawCount} title-search hit(s)${queryNote}; top candidate "${search.topCandidate.artist} - ${search.topCandidate.title}" did not match expected artist/title/album`
+							: `${search.rawCount} title-search hit(s)${queryNote} but no usable candidate metadata`;
+					console.log(
+						`[plex-sync] No Plex match for track list_item ${item.id} ` +
+						`"${item.artist_name} - ${item.title}" (album="${item.album_name ?? ''}", sectionId=${librarySectionId}): ${detail}`
+					);
+					result.notFound++;
+					result.unmatched.push({
+						listItemId: item.id,
+						artistName: item.artist_name,
+						title: item.title
+					});
+				}
+			}
+
+			if (ratingKey) {
+				if (matchNote) {
+					console.log(
+						`[plex-sync] ${matchNote}, ratingKey ${ratingKey}${
+							item.type === 'album' ? ' (all tracks will be added by Plex)' : ''
+						}`
 					);
 				}
 				foundItems.push({
 					listItemId: item.id,
-					ratingKey: search.track.ratingKey
-				});
-			} else {
-				const queryNote = search.queryUsed && search.queryUsed !== item.title ? ` (last query="${search.queryUsed}")` : '';
-				const detail =
-					search.rawCount === 0
-						? `no Plex search results across normalization variants${queryNote} — title may be indexed differently or library not yet scanned`
-						: search.topCandidate
-						? `${search.rawCount} title-search hit(s)${queryNote}; top candidate "${search.topCandidate.artist} - ${search.topCandidate.title}" did not match expected artist/title/album`
-						: `${search.rawCount} title-search hit(s)${queryNote} but no usable candidate metadata`;
-				console.log(
-					`[plex-sync] No Plex match for list_item ${item.id} ` +
-					`"${item.artist_name} - ${item.title}" (album="${item.album_name ?? ''}", sectionId=${librarySectionId}): ${detail}`
-				);
-				result.notFound++;
-				result.unmatched.push({
-					listItemId: item.id,
-					artistName: item.artist_name,
-					title: item.title
+					ratingKey
 				});
 			}
 		} catch (err) {

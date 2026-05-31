@@ -818,6 +818,118 @@ export async function searchTrack(
 	return r.track;
 }
 
+// ── Album Search and Retrieval ───────────────────────────────────────────────
+
+export interface SearchAlbumResult {
+	album: PlexTrack | null;
+	rawCount: number;
+	topCandidate?: { title: string; artist: string };
+	matchedBy?: 'exact' | 'fuzzy-artist-substring' | 'title-only';
+	queryUsed?: string;
+}
+
+async function fetchAlbumSearch(
+	sectionId: string,
+	query: string,
+	fetchFn?: FetchFn
+): Promise<PlexTrack[]> {
+	const raw = await request<{ MediaContainer: { Metadata?: PlexTrack[] } }>(
+		'GET',
+		`/library/sections/${sectionId}/search?type=9&query=${encodeURIComponent(query)}`,
+		{ fetchFn }
+	);
+	return raw.MediaContainer.Metadata ?? [];
+}
+
+/**
+ * Search for an album in Plex by artist name + album title.
+ */
+export async function searchAlbumDiagnostic(
+	artistName: string,
+	albumTitle: string,
+	sectionId: string,
+	fetchFn?: FetchFn
+): Promise<SearchAlbumResult> {
+	if (!sectionId) {
+		throw new PlexError('No Plex library section ID provided for this user mapping.');
+	}
+
+	const variants = titleSearchVariants(albumTitle);
+	let results: PlexTrack[] = [];
+	let queryUsed = variants[0];
+	for (const v of variants) {
+		const hits = await fetchAlbumSearch(sectionId, v, fetchFn);
+		if (hits.length > 0) {
+			results = hits;
+			queryUsed = v;
+			break;
+		}
+	}
+
+	if (results.length === 0) {
+		return { album: null, rawCount: 0, queryUsed };
+	}
+
+	const artistNorm = normalizeForMatch(artistName);
+	const titleNorm = normalizeForMatch(albumTitle);
+
+	const exact = results.find(
+		(t) =>
+			normalizeForMatch(t.title) === titleNorm &&
+			normalizeForMatch(t.parentTitle ?? '') === artistNorm
+	);
+	if (exact) {
+		return { album: exact, rawCount: results.length, matchedBy: 'exact', queryUsed };
+	}
+
+	const fuzzy = results.find(
+		(t) => {
+			const tArtist = normalizeForMatch(t.parentTitle ?? '');
+			return (
+				normalizeForMatch(t.title) === titleNorm &&
+				artistNorm.length > 0 &&
+				tArtist.includes(artistNorm)
+			);
+		}
+	);
+	if (fuzzy) {
+		return { album: fuzzy, rawCount: results.length, matchedBy: 'fuzzy-artist-substring', queryUsed };
+	}
+
+	const titleOnly = results.find((t) => normalizeForMatch(t.title) === titleNorm);
+	if (titleOnly) {
+		return { album: titleOnly, rawCount: results.length, matchedBy: 'title-only', queryUsed };
+	}
+
+	const top = results[0];
+	return {
+		album: null,
+		rawCount: results.length,
+		queryUsed,
+		topCandidate: top
+			? { title: top.title, artist: top.parentTitle ?? '(unknown artist)' }
+			: undefined
+	};
+}
+
+/**
+ * Fetch all tracks belonging to an album.
+ */
+export async function getAlbumTracks(
+	userToken: string,
+	albumRatingKey: string,
+	fetchFn?: FetchFn
+): Promise<PlexTrack[]> {
+	const raw = await request<{
+		MediaContainer: { Metadata?: PlexTrack[] };
+	}>('GET', `/library/metadata/${albumRatingKey}/children`, {
+		token: userToken,
+		fetchFn
+	});
+	return raw.MediaContainer.Metadata ?? [];
+}
+
+
 // ── Public API — Playlist CRUD ────────────────────────────────────────────────
 
 /**
